@@ -1,10 +1,5 @@
-#ifndef FUNCMOTOR_H
-#define FUNCMOTOR_H
-
 #include <Arduino.h>
 #include <ESP32Encoder.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 // ===== ĐỊNH NGHĨA CHÂN BTS7960 DRIVER =====
 #define RL_EN  4
@@ -14,6 +9,11 @@
 // ===== ĐỊNH NGHĨA CHÂN ENCODER =====
 #define ENCODER_C1  35
 #define ENCODER_C2  36
+
+// ===== ĐỊNH NGHĨA CHÂN LIMIT SWITCH =====
+#define LIMIT_SWITCH_12 12
+#define LIMIT_SWITCH_14 14
+
 // ===== CẤU HÌNH PWM =====
 #define PWM_FREQ     20000
 #define PWM_CHANNEL  0
@@ -34,14 +34,13 @@ enum SpeedLevel {
   SPEED_4 = 255
 };
 
-// ===== HƯỚNG QUAY =====
 enum Direction {
   DIR_STOP = 0,
   DIR_CLOCKWISE = 1,
   DIR_COUNTER_CLOCKWISE = 2
 };
 
-// ===== PID CONTROLLER với ADAPTIVE LEARNING =====
+// ===== PID CONTROLLER với COMPENSATION =====
 struct PIDController {
   // PID Core Parameters
   float Kp = 2.0;
@@ -61,7 +60,7 @@ struct PIDController {
   unsigned long last_time = 0;
   bool first_call = true;
   
-  // Compensation Learning (từ motor behavior)
+  // Compensation Learning
   float overshootPerRev = 0;
   int crawlSpeedBase = 0;
   int moveCount = 0;
@@ -78,7 +77,6 @@ struct PIDController {
   int64_t crawl_zone_start = 150;
   int64_t stop_zone_start = 280;
   
-  // ===== HỌC TỪ LỊCH SỬ =====
   void addMeasurement(int64_t finalError, int64_t totalDistance, Direction dir) {
     moveCount++;
     lastDirection = dir;
@@ -101,7 +99,7 @@ struct PIDController {
       }
       overshootPerRev = sum / historyCount;
       
-      Serial.printf("🎓 PID learned overshoot/rev: %.1f pulses (from %d moves)\n", 
+      Serial.printf("🎓 Learned overshoot/rev: %.1f pulses (from %d moves)\n", 
                     overshootPerRev, historyCount);
     }
     
@@ -119,7 +117,6 @@ struct PIDController {
     crawlSpeedBase = constrain(crawlSpeedBase, -20, 30);
   }
   
-  // ===== DỰ ĐOÁN OVERSHOOT =====
   int64_t getPredictedOvershoot(int64_t totalDistance) {
     if(historyCount < 2) return 0;
     
@@ -127,7 +124,6 @@ struct PIDController {
     return (int64_t)(overshootPerRev * revolutions);
   }
   
-  // ===== ADAPTIVE CRAWL SPEED =====
   int getAdaptiveCrawlSpeed(int64_t totalDistance) {
     int baseCrawl = MIN_STARTUP_SPEED - 20;
     int warmBoost = motorIsWarm ? 5 : 0;
@@ -143,17 +139,15 @@ struct PIDController {
     return constrain(adaptiveCrawl, MIN_STARTUP_SPEED - 30, MIN_STARTUP_SPEED + 10);
   }
   
-  // ===== PID COMPUTE với COMPENSATION =====
   int compute(int64_t setpoint, int64_t current_position, int64_t totalDistance, Direction dir) {
     unsigned long now = millis();
     
-    // FIRST CALL - BÙ QUÁN TÍNH
+    // First Call - Compensation
     if(first_call) {
       last_time = now;
       
       int64_t raw_error = setpoint - current_position;
       
-      // Áp dụng compensation nếu đã học đủ
       if(historyCount >= 2 && totalDistance > 500) {
         int64_t predictedOvershoot = getPredictedOvershoot(totalDistance);
         
@@ -163,7 +157,7 @@ struct PIDController {
           raw_error += predictedOvershoot;
         }
         
-        Serial.printf("🎯 PID compensation: %ld pulses\n", (long)predictedOvershoot);
+        Serial.printf("🎯 Initial compensation: %ld pulses\n", (long)predictedOvershoot);
       }
       
       last_error = raw_error;
@@ -176,15 +170,14 @@ struct PIDController {
       return pwm;
     }
     
-    // NORMAL PID LOOP
+    // Normal PID Loop
     float dt = (now - last_time) / 1000.0;
     if(dt <= 0 || dt > 1.0) dt = 0.01;
     
     int64_t error = setpoint - current_position;
     
-    // Deadband check
     if(abs(error) <= deadband) {
-      Serial.println("🎯 PID: Within deadband → STOP");
+      Serial.println("🎯 Within deadband → STOP");
       return 0;
     }
     
@@ -205,26 +198,22 @@ struct PIDController {
     float pid_output = P + I + D;
     int pwm = (int)abs(pid_output);
     
-    // ===== DECELERATION ZONES với ADAPTIVE CRAWL =====
+    // Deceleration Zones
     int64_t abs_error = abs(error);
     
     if(abs_error > decel_zone_start) {
-      // Full speed zone
       pwm = constrain(pwm, min_output, max_output);
     }
     else if(abs_error > crawl_zone_start) {
-      // Deceleration zone
       float progress = (float)(abs_error - crawl_zone_start) / (decel_zone_start - crawl_zone_start);
       int decelSpeed = min_output + (int)(progress * (max_output - min_output));
       pwm = max(pwm, decelSpeed);
     }
     else if(abs_error > stop_zone_start) {
-      // Crawl zone
       int adaptiveCrawl = getAdaptiveCrawlSpeed(totalDistance);
       pwm = max(pwm, adaptiveCrawl);
     }
     else {
-      // Stop zone - rất chậm
       int stopSpeed = min_output - 45;
       
       if(historyCount >= 2) {
@@ -242,27 +231,14 @@ struct PIDController {
     return pwm;
   }
   
-  // ===== RESET =====
   void resetPID() {
     error_integral = 0;
     last_error = 0;
     last_time = 0;
     first_call = true;
-    Serial.println("✅ PID state reset");
+    Serial.println("✅ PID reset");
   }
   
-  void resetLearning() {
-    moveCount = 0;
-    historyCount = 0;
-    overshootPerRev = 0;
-    crawlSpeedBase = 0;
-    motorIsWarm = false;
-    for(int i = 0; i < 5; i++) overshootHistory[i] = 0;
-    historyIndex = 0;
-    Serial.println("✅ PID learning reset");
-  }
-  
-  // ===== TUNE =====
   void tune(float kp, float ki, float kd) {
     Kp = kp;
     Ki = ki;
@@ -270,19 +246,17 @@ struct PIDController {
     Serial.printf("✅ PID tuned: Kp=%.2f Ki=%.3f Kd=%.1f\n", Kp, Ki, Kd);
   }
   
-  // ===== PRINT STATUS =====
   void printStatus() {
     Serial.println("\n╔═══ PID STATUS ═══╗");
     Serial.printf("║ Moves: %d | Warm: %s\n", moveCount, motorIsWarm ? "YES" : "NO");
     Serial.printf("║ Overshoot/rev: %.1f pulses\n", overshootPerRev);
     Serial.printf("║ Crawl adj: %+d PWM\n", crawlSpeedBase);
     Serial.printf("║ Gains: Kp=%.2f Ki=%.3f Kd=%.1f\n", Kp, Ki, Kd);
-    Serial.printf("║ Integral: %.1f (limit=%.1f)\n", error_integral, integral_limit);
+    Serial.printf("║ Integral: %.1f\n", error_integral);
     Serial.println("╚══════════════════╝");
   }
 };
 
-// ===== GLOBAL INSTANCES =====
 PIDController pid;
 ESP32Encoder encoder;
 int currentSpeed = 0;
@@ -291,72 +265,9 @@ unsigned long lastSpeedCheck = 0;
 int64_t lastEncoderPosition = 0;
 float motorRPM = 0;
 
-int maxSpeedLimit = 250;          
-bool jogMode = false;              
-Direction jogDirection = DIR_STOP;  
-int jogSpeed = 200;                 
-int64_t softLimitMin = -999999999;  
-int64_t softLimitMax = 999999999;  
-bool softLimitsEnabled = false;
-
-// ✅ ASYNC MOTOR CONTROL
-TaskHandle_t motorTaskHandle = NULL;
-volatile bool motorTaskRunning = false;
-struct MotorCommand {
-  int64_t targetPosition;
-  int maxSpeed;
-  bool active;
-} motorCommand = {0, 0, false};
-
-// ===== HÀM TÍNH GÓC/VÒNG =====
-float getAngleDegrees() {
-  int64_t pos = encoder.getCount();
-  int64_t positionMod = pos % TOTAL_PULSES_PER_REV;
-  if(positionMod < 0) positionMod += TOTAL_PULSES_PER_REV;
-  return (positionMod * 360.0) / (float)TOTAL_PULSES_PER_REV;
-}
-
-float getRevolutions() {
-  return (float)encoder.getCount() / (float)TOTAL_PULSES_PER_REV;
-}
-
-void resetEncoder() {
-  encoder.clearCount();
-  lastEncoderPosition = 0;
-  Serial.println("✓ Encoder reset");
-}
-
-void readEncoderSpeed() {
-  unsigned long currentTime = millis();
-  
-  if(currentTime - lastSpeedCheck >= 100) {
-    int64_t currentPosition = encoder.getCount();
-    int64_t pulseCount = currentPosition - lastEncoderPosition;
-    
-    float pulsesPerSecond = (pulseCount * 1000.0) / (currentTime - lastSpeedCheck);
-    motorRPM = (pulsesPerSecond * 60.0) / TOTAL_PULSES_PER_REV;
-    
-    lastEncoderPosition = currentPosition;
-    lastSpeedCheck = currentTime;
-  }
-}
-
-void printDetailedStatus() {
-  Serial.println("\n╔═══════════════════ STATUS ═══════════════════╗");
-  int64_t pos = encoder.getCount();
-  Serial.printf("║ Position:     %ld pulses\n", (long)pos);
-  Serial.printf("║ Revolutions:  %.3f vòng\n", getRevolutions());
-  Serial.printf("║ Angle:        %.2f°\n", getAngleDegrees());
-  Serial.printf("║ RPM:          %.2f (target: %d)\n", motorRPM, MOTOR_RPM);
-  Serial.printf("║ PWM:          %d (%d%%)\n", currentSpeed, (currentSpeed*100)/255);
-  Serial.print("║ Direction:    ");
-  Serial.println(currentDirection == DIR_CLOCKWISE ? "CW" : 
-                 currentDirection == DIR_COUNTER_CLOCKWISE ? "CCW" : "STOP");
-  Serial.println("╚═══════════════════════════════════════════════");
-}
-
 void setMotorDirection(Direction dir) {
   currentDirection = dir;
+  
   switch(dir) {
     case DIR_STOP:
       digitalWrite(R_PWM, LOW);
@@ -388,11 +299,178 @@ void setSpeedLevel(Direction dir, SpeedLevel level) {
     motorStop();
     return;
   }
+  
   setMotorDirection(dir);
   setMotorSpeed((int)level);
 }
 
-// ===== PID MOVE FUNCTION =====
+void readEncoderSpeed() {
+  unsigned long currentTime = millis();
+  
+  if(currentTime - lastSpeedCheck >= 100) {
+    int64_t currentPosition = encoder.getCount();
+    int64_t pulseCount = currentPosition - lastEncoderPosition;
+    
+    float pulsesPerSecond = (pulseCount * 1000.0) / (currentTime - lastSpeedCheck);
+    motorRPM = (pulsesPerSecond * 60.0) / TOTAL_PULSES_PER_REV;
+    
+    lastEncoderPosition = currentPosition;
+    lastSpeedCheck = currentTime;
+  }
+}
+
+float getAngleDegrees() {
+  int64_t pos = encoder.getCount();
+  int64_t positionMod = pos % TOTAL_PULSES_PER_REV;
+  if(positionMod < 0) positionMod += TOTAL_PULSES_PER_REV;
+  return (positionMod * 360.0) / (float)TOTAL_PULSES_PER_REV;
+}
+
+float getRevolutions() {
+  return (float)encoder.getCount() / (float)TOTAL_PULSES_PER_REV;
+}
+
+void printDetailedStatus() {
+  Serial.println("\n╔════════════════════ STATUS ═══════════════════╗");
+  
+  int64_t pos = encoder.getCount();
+  Serial.printf("║ Position:     %ld pulses\n", (long)pos);
+  Serial.printf("║ Revolutions:  %.3f vòng\n", getRevolutions());
+  Serial.printf("║ Angle:        %.2f°\n", getAngleDegrees());
+  Serial.printf("║ RPM:          %.2f (target: %d)\n", motorRPM, MOTOR_RPM);
+  Serial.printf("║ PWM:          %d (%d%%)\n", currentSpeed, (currentSpeed*100)/255);
+  Serial.print("║ Direction:    ");
+  Serial.println(currentDirection == DIR_CLOCKWISE ? "CW" : 
+                 currentDirection == DIR_COUNTER_CLOCKWISE ? "CCW" : "STOP");
+  Serial.printf("║ Limit 12:     %s\n", digitalRead(LIMIT_SWITCH_12) == HIGH ? "HIGH" : "LOW");
+  Serial.printf("║ Limit 14:     %s\n", digitalRead(LIMIT_SWITCH_14) == HIGH ? "HIGH" : "LOW");
+  Serial.println("╚═══════════════════════════════════════════════╝");
+}
+
+void calibrateMotor() {
+  Serial.println("\n╔═══════════════════════════════════════════════╗");
+  Serial.println("║           🔧 MOTOR CALIBRATION 🔧             ║");
+  Serial.println("╚═══════════════════════════════════════════════╝");
+  
+  int64_t backoffDistance = TOTAL_PULSES_PER_REV / 5; // 0.2 vòng
+  
+  // ===== BƯỚC 1: Tìm LIMIT 12 (trái) =====
+  Serial.println("\n[1] Moving CW to find LEFT limit (Button 12)...");
+  setMotorDirection(DIR_CLOCKWISE);
+  setMotorSpeed(SPEED_2);
+  
+  unsigned long timeout = millis();
+  while(digitalRead(LIMIT_SWITCH_12) == HIGH) {
+    readEncoderSpeed();
+    delay(10);
+    
+    if(millis() - timeout > 30000) {
+      motorStop();
+      Serial.println("❌ Timeout - Button 12 not found!");
+      return;
+    }
+  }
+  motorStop();
+  Serial.println("✅ Found LEFT limit (Button 12)!");
+  delay(300);
+  
+  // Lùi ra khỏi nút
+  Serial.println("[2] Backing off from LEFT limit...");
+  int64_t startPos = encoder.getCount();
+  
+  setMotorDirection(DIR_COUNTER_CLOCKWISE);
+  setMotorSpeed(SPEED_2);
+  
+  timeout = millis();
+  while(digitalRead(LIMIT_SWITCH_12) == LOW) {
+    readEncoderSpeed();
+    delay(10);
+    if(millis() - timeout > 5000) break;
+  }
+  
+  delay(200);
+  int64_t currentPos = encoder.getCount();
+  int64_t targetPos = currentPos - (backoffDistance / 2);
+  
+  while(encoder.getCount() > targetPos) {
+    readEncoderSpeed();
+    delay(10);
+  }
+  motorStop();
+  
+  int64_t leftLimitPos = encoder.getCount();
+  Serial.printf("✅ LEFT limit position: %ld\n", (long)leftLimitPos);
+  delay(500);
+  
+  // ===== BƯỚC 2: Tìm LIMIT 14 (phải) =====
+  Serial.println("\n[3] Moving CW to find RIGHT limit (Button 14)...");
+  setMotorDirection(DIR_CLOCKWISE);
+  setMotorSpeed(SPEED_2);
+  
+  timeout = millis();
+  while(digitalRead(LIMIT_SWITCH_14) == HIGH) {
+    readEncoderSpeed();
+    delay(10);
+    
+    if(millis() - timeout > 30000) {
+      motorStop();
+      Serial.println("❌ Timeout - Button 14 not found!");
+      return;
+    }
+  }
+  motorStop();
+  Serial.println("✅ Found RIGHT limit (Button 14)!");
+  delay(300);
+  
+  // Lùi ra khỏi nút
+  Serial.println("[4] Backing off from RIGHT limit...");
+  startPos = encoder.getCount();
+  
+  setMotorDirection(DIR_COUNTER_CLOCKWISE);
+  setMotorSpeed(SPEED_2);
+  
+  timeout = millis();
+  while(digitalRead(LIMIT_SWITCH_14) == LOW) {
+    readEncoderSpeed();
+    delay(10);
+    if(millis() - timeout > 5000) break;
+  }
+  
+  delay(200);
+  currentPos = encoder.getCount();
+  targetPos = currentPos - (backoffDistance / 2);
+  
+  while(encoder.getCount() > targetPos) {
+    readEncoderSpeed();
+    delay(10);
+  }
+  motorStop();
+  
+  int64_t rightLimitPos = encoder.getCount();
+  Serial.printf("✅ RIGHT limit position: %ld\n", (long)rightLimitPos);
+  
+  // ===== KẾT QUẢ =====
+  int64_t travelDistance = rightLimitPos - leftLimitPos;
+  
+  Serial.println("\n╔═══════════════════════════════════════════════╗");
+  Serial.println("║          ✅ CALIBRATION COMPLETED! ✅          ║");
+  Serial.println("╚═══════════════════════════════════════════════╝");
+  Serial.printf("\nLEFT limit:   %ld pulses\n", (long)leftLimitPos);
+  Serial.printf("RIGHT limit:  %ld pulses\n", (long)rightLimitPos);
+  Serial.printf("Travel range: %ld pulses (%.2f revs)\n", 
+    (long)travelDistance,
+    (float)travelDistance / TOTAL_PULSES_PER_REV);
+  
+  // Reset encoder về giữa
+  Serial.println("\n[5] Moving to CENTER position...");
+  int64_t centerPos = leftLimitPos + (travelDistance / 2);
+  encoder.clearCount();
+  
+  Serial.printf("CENTER set to position 0 (physical: %ld)\n", (long)centerPos);
+  
+  printDetailedStatus();
+}
+
 void moveToPositionPID(int64_t targetPulses, int maxSpeed = 250) {
   if(maxSpeed < MIN_STARTUP_SPEED) {
     maxSpeed = MIN_STARTUP_SPEED;
@@ -442,7 +520,7 @@ void moveToPositionPID(int64_t targetPulses, int maxSpeed = 250) {
     int pwm = pid.compute(targetPulses, currentPos, totalDistance, dir);
     
     if(pwm == 0) {
-      break;  // Deadband reached
+      break;
     }
     
     setMotorSpeed(pwm);
@@ -503,250 +581,14 @@ void moveToPositionPID(int64_t targetPulses, int maxSpeed = 250) {
   pid.printStatus();
 }
 
-// ✅ MOTOR CONTROL TASK - PID VERSION
-void motorControlTask(void* parameter) {
-  while(true) {
-    if(motorCommand.active) {
-      motorTaskRunning = true;
-      
-      int64_t targetPulses = motorCommand.targetPosition;
-      int maxSpeed = motorCommand.maxSpeed;
-      
-      // ✅ SỬ DỤNG PID THAY VÌ TRAPEZOIDAL
-      moveToPositionPID(targetPulses, maxSpeed);
-      
-      motorCommand.active = false;
-      motorTaskRunning = false;
-      
-      Serial.println("✅ Move completed (PID)");
-    }
-    
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
-}
-
-// ===== WEB API FUNCTIONS =====
-void API_moveByDegrees(float degrees) {
-  int64_t pulses = (int64_t)((degrees / 360.0) * TOTAL_PULSES_PER_REV);
-  int64_t targetPos = encoder.getCount() + pulses;
-  
-  Serial.printf("\n🌐 API: Move by %.2f degrees (%ld pulses)\n", degrees, (long)pulses);
-  
-  motorCommand.targetPosition = targetPos;
-  motorCommand.maxSpeed = maxSpeedLimit;
-  motorCommand.active = true;
-}
-
-void API_moveToAbsoluteDegrees(float degrees) {
-  while(degrees < 0) degrees += 360;
-  while(degrees >= 360) degrees -= 360;
-  
-  float currentAngle = getAngleDegrees();
-  float angleDiff = degrees - currentAngle;
-  
-  if(angleDiff > 180) angleDiff -= 360;
-  if(angleDiff < -180) angleDiff += 360;
-  
-  int64_t pulses = (int64_t)((angleDiff / 360.0) * TOTAL_PULSES_PER_REV);
-  int64_t targetPos = encoder.getCount() + pulses;
-  
-  Serial.printf("\n🌐 API: Move to %.2f° (from %.2f°, delta %.2f°)\n", 
-    degrees, currentAngle, angleDiff);
-  
-  motorCommand.targetPosition = targetPos;
-  motorCommand.maxSpeed = maxSpeedLimit;
-  motorCommand.active = true;
-}
-
-void API_moveRevolutions(float revolutions) {
-  int64_t pulses = (int64_t)(revolutions * TOTAL_PULSES_PER_REV);
-  int64_t targetPos = encoder.getCount() + pulses;
-  
-  Serial.printf("\n🌐 API: Move %.2f revolutions (%ld pulses)\n", 
-    revolutions, (long)pulses);
-  
-  motorCommand.targetPosition = targetPos;
-  motorCommand.maxSpeed = maxSpeedLimit;
-  motorCommand.active = true;
-}
-
-void API_moveToAbsolutePosition(int64_t position) {
-  Serial.printf("\n🌐 API: Move to absolute position %ld\n", (long)position);
-  
-  motorCommand.targetPosition = position;
-  motorCommand.maxSpeed = maxSpeedLimit;
-  motorCommand.active = true;
-}
-
-String API_getCurrentPosition() {
-  String json = "{";
-  json += "\"position\":" + String((long)encoder.getCount()) + ",";
-  json += "\"angle\":" + String(getAngleDegrees(), 2) + ",";
-  json += "\"revolutions\":" + String(getRevolutions(), 3) + ",";
-  json += "\"rpm\":" + String(motorRPM, 2);
-  json += "}";
-  return json;
-}
-
-void API_resetPosition() {
-  Serial.println("\n🌐 API: Reset position");
-  resetEncoder();
-  pid.resetLearning();
-}
-
-void API_stopMotor() {
-  Serial.println("\n🌐 API: Emergency stop");
-  motorCommand.active = false;
-  motorStop();
-}
-
-String API_getStatus() {
-  String json = "{";
-  json += "\"position\":" + String((long)encoder.getCount()) + ",";
-  json += "\"angle\":" + String(getAngleDegrees(), 2) + ",";
-  json += "\"revolutions\":" + String(getRevolutions(), 3) + ",";
-  json += "\"rpm\":" + String(motorRPM, 2) + ",";
-  json += "\"pwm\":" + String(currentSpeed) + ",";
-  json += "\"direction\":\"" + String(
-    currentDirection == DIR_CLOCKWISE ? "CW" : 
-    currentDirection == DIR_COUNTER_CLOCKWISE ? "CCW" : "STOP"
-  ) + "\",";
-  json += "\"moves\":" + String(pid.moveCount) + ",";
-  json += "\"warm\":" + String(pid.motorIsWarm ? "true" : "false") + ",";
-  json += "\"busy\":" + String(motorTaskRunning ? "true" : "false");
-  json += "}";
-  return json;
-}
-
-// ===== API: PID CONTROL =====
-void API_tunePID(float kp, float ki, float kd) {
-  Serial.printf("\n🌐 API: Tune PID (Kp=%.2f Ki=%.3f Kd=%.1f)\n", kp, ki, kd);
-  pid.tune(kp, ki, kd);
-}
-
-void API_resetPID() {
-  Serial.println("\n🌐 API: Reset PID");
-  pid.resetPID();
-  pid.resetLearning();
-}
-
-String API_getPIDStatus() {
-  String json = "{";
-  json += "\"kp\":" + String(pid.Kp, 2) + ",";
-  json += "\"ki\":" + String(pid.Ki, 3) + ",";
-  json += "\"kd\":" + String(pid.Kd, 1) + ",";
-  json += "\"moves\":" + String(pid.moveCount) + ",";
-  json += "\"overshoot\":" + String(pid.overshootPerRev, 1) + ",";
-  json += "\"integral\":" + String(pid.error_integral, 1) + ",";
-  json += "\"deadband\":" + String((long)pid.deadband);
-  json += "}";
-  return json;
-}
-
-// ===== API: MAX SPEED =====
-void API_setMaxSpeed(int speed) {
-  maxSpeedLimit = constrain(speed, MIN_STARTUP_SPEED, 255);
-  Serial.printf("🌐 API: Max speed set to %d\n", maxSpeedLimit);
-}
-
-// ===== API: MANUAL SPEED CONTROL =====
-void API_setManualSpeed(Direction dir, int speed) {
-  if(softLimitsEnabled) {
-    int64_t pos = encoder.getCount();
-    if((dir == DIR_CLOCKWISE && pos >= softLimitMax) ||
-       (dir == DIR_COUNTER_CLOCKWISE && pos <= softLimitMin)) {
-      Serial.println("⚠️ Soft limit reached!");
-      motorStop();
-      return;
-    }
-  }
-  
-  setMotorDirection(dir);
-  setMotorSpeed(speed);
-  Serial.printf("🌐 API: Manual %s @ %d PWM\n", 
-    dir == DIR_CLOCKWISE ? "CW" : "CCW", speed);
-}
-
-// ===== API: JOG MODE =====
-void API_startJog(Direction dir, int speed) {
-  jogMode = true;
-  jogDirection = dir;
-  jogSpeed = constrain(speed, MIN_STARTUP_SPEED, 255);
-  API_setManualSpeed(dir, jogSpeed);
-  Serial.printf("🌐 API: Jog %s started @ %d\n", 
-    dir == DIR_CLOCKWISE ? "CW" : "CCW", jogSpeed);
-}
-
-void API_stopJog() {
-  jogMode = false;
-  motorStop();
-  Serial.println("🌐 API: Jog stopped");
-}
-
-// ===== API: EMERGENCY BRAKE =====
-void API_emergencyBrake() {
-  Serial.println("🌐 API: EMERGENCY BRAKE!");
-  
-  motorStop();
-  
-  Direction brakeDir = (currentDirection == DIR_CLOCKWISE) ? 
-    DIR_COUNTER_CLOCKWISE : DIR_CLOCKWISE;
-  
-  setMotorDirection(brakeDir);
-  setMotorSpeed(255);
-  delay(50);
-  motorStop();
-  
-  motorCommand.active = false;
-}
-
-// ===== API: IS MOVING =====
-bool API_isMoving() {
-  return motorTaskRunning;
-}
-
-// ===== API: SOFT LIMITS =====
-void API_setSoftLimits(int64_t minPos, int64_t maxPos) {
-  if(minPos < maxPos) {
-    softLimitMin = minPos;
-    softLimitMax = maxPos;
-    softLimitsEnabled = true;
-    Serial.printf("🌐 API: Soft limits set [%ld, %ld]\n", 
-      (long)minPos, (long)maxPos);
-  } else {
-    Serial.println("❌ Invalid limits: min must be < max");
-  }
-}
-
-void API_disableSoftLimits() {
-  softLimitsEnabled = false;
-  Serial.println("🌐 API: Soft limits disabled");
-}
-
-// ===== API: GET ALL CONFIG =====
-String API_getAllConfig() {
-  String json = "{";
-  json += "\"maxSpeed\":" + String(maxSpeedLimit) + ",";
-  json += "\"minStartupSpeed\":" + String(MIN_STARTUP_SPEED) + ",";
-  json += "\"pulsesPerRev\":" + String(TOTAL_PULSES_PER_REV) + ",";
-  json += "\"targetRPM\":" + String(MOTOR_RPM) + ",";
-  json += "\"softLimitsEnabled\":" + String(softLimitsEnabled ? "true" : "false") + ",";
-  json += "\"softLimitMin\":" + String((long)softLimitMin) + ",";
-  json += "\"softLimitMax\":" + String((long)softLimitMax) + ",";
-  json += "\"jogMode\":" + String(jogMode ? "true" : "false");
-  json += "}";
-  return json;
-}
-
-// ===== SETUP =====
-void motorSetup() {
-  if(!Serial) {
-    Serial.begin(115200);
-    delay(100);
-  }
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
   
   pinMode(R_PWM, OUTPUT);
   pinMode(L_PWM, OUTPUT);
+  pinMode(LIMIT_SWITCH_12, INPUT_PULLUP);
+  pinMode(LIMIT_SWITCH_14, INPUT_PULLUP);
   
   ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
   ledcAttachPin(RL_EN, PWM_CHANNEL);
@@ -758,44 +600,37 @@ void motorSetup() {
   
   motorStop();
   
-  // ✅ CREATE MOTOR TASK ON CORE 0 (WiFi on core 1)
-  xTaskCreatePinnedToCore(
-    motorControlTask,
-    "MotorTask",
-    8192,
-    NULL,
-    1,
-    &motorTaskHandle,
-    0
-  );
-  
-  Serial.println("\n╔════════════════════════════════════════════════╗");
-  Serial.println("║  ESP32-S3 Motor Control - PID + ASYNC MODE    ║");
-  Serial.println("╚════════════════════════════════════════════════╝");
-  Serial.println("\n🎯 PID Move Commands:");
-  Serial.println("  M90      - Move by 90°");
-  Serial.println("  A180     - Move to absolute 180°");
+  Serial.println("\n╔════════════════════════════════╗");
+  Serial.println("║  ESP32-S3 PID Motor Control    ║");
+  Serial.println("╚════════════════════════════════╝");
+  Serial.println("\n🎯 PID Commands:");
+  Serial.println("  M90      - Move by 90° (relative)");
+  Serial.println("  A90      - Move to 90° (absolute)");
   Serial.println("  R1.5     - Move 1.5 revolutions");
-  Serial.println("\n🎮 Manual Control:");
-  Serial.println("  CW1      - Clockwise Speed 1");
-  Serial.println("  CW2/3/4  - Clockwise Speed 2/3/4");
-  Serial.println("  CCW1-4   - Counter-Clockwise");
-  Serial.println("  S        - STOP");
-  Serial.println("\n⚙️ System:");
-  Serial.println("  POS      - Get position (JSON)");
-  Serial.println("  STATUS   - Full status (JSON)");
-  Serial.println("  PIDSTATUS- PID status (JSON)");
-  Serial.println("  PIDINFO  - PID detailed info");
-  Serial.println("  RESET    - Reset position & PID");
-  Serial.println("  TUNE <Kp> <Ki> <Kd> - Tune PID gains");
-  Serial.printf("\nPPR: %d | Motor: %d RPM\n", TOTAL_PULSES_PER_REV, MOTOR_RPM);
-  Serial.println("✅ PID motor controller ready (Core 0)");
-  Serial.println("\n>>> Ready! <<<\n");
+  Serial.println("  P1000    - Move to position 1000 pulses");
   
-  printDetailedStatus();
+  Serial.println("\n🎮 Manual Control:");
+  Serial.println("  CW1      - Clockwise Speed 1 (160 PWM)");
+  Serial.println("  CW2      - Clockwise Speed 2 (190 PWM)");
+  Serial.println("  CW3      - Clockwise Speed 3 (220 PWM)");
+  Serial.println("  CW4      - Clockwise Speed 4 (255 PWM)");
+  Serial.println("  CCW1     - Counter-Clockwise Speed 1");
+  Serial.println("  CCW2     - Counter-Clockwise Speed 2");
+  Serial.println("  CCW3     - Counter-Clockwise Speed 3");
+  Serial.println("  CCW4     - Counter-Clockwise Speed 4");
+  Serial.println("  S        - STOP motor");
+  
+  Serial.println("\n⚙️ System Commands:");
+  Serial.println("  CAL      - Calibrate motor (find limits)");
+  Serial.println("  TUNE <Kp> <Ki> <Kd> - Tune PID");
+  Serial.println("  INFO     - Show PID + position status");
+  Serial.println("  RESET    - Reset encoder & PID");
+  Serial.println("\n>>> Ready! <<<\n");
 }
 
-void processSerialCommands() {
+void loop() {
+  readEncoderSpeed();
+  
   if(Serial.available() > 0) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
@@ -804,60 +639,68 @@ void processSerialCommands() {
     // ===== MANUAL CONTROL =====
     if(cmd == "CW1") {
       setSpeedLevel(DIR_CLOCKWISE, SPEED_1);
-      Serial.println("✓ CW Speed 1");
+      Serial.println("✓ CW Speed 1 (160 PWM)");
     }
     else if(cmd == "CW2") {
       setSpeedLevel(DIR_CLOCKWISE, SPEED_2);
-      Serial.println("✓ CW Speed 2");
+      Serial.println("✓ CW Speed 2 (190 PWM)");
     }
     else if(cmd == "CW3") {
       setSpeedLevel(DIR_CLOCKWISE, SPEED_3);
-      Serial.println("✓ CW Speed 3");
+      Serial.println("✓ CW Speed 3 (220 PWM)");
     }
     else if(cmd == "CW4") {
       setSpeedLevel(DIR_CLOCKWISE, SPEED_4);
-      Serial.println("✓ CW Speed 4");
+      Serial.println("✓ CW Speed 4 (255 PWM)");
     }
     else if(cmd == "CCW1") {
       setSpeedLevel(DIR_COUNTER_CLOCKWISE, SPEED_1);
-      Serial.println("✓ CCW Speed 1");
+      Serial.println("✓ CCW Speed 1 (160 PWM)");
     }
     else if(cmd == "CCW2") {
       setSpeedLevel(DIR_COUNTER_CLOCKWISE, SPEED_2);
-      Serial.println("✓ CCW Speed 2");
+      Serial.println("✓ CCW Speed 2 (190 PWM)");
     }
     else if(cmd == "CCW3") {
       setSpeedLevel(DIR_COUNTER_CLOCKWISE, SPEED_3);
-      Serial.println("✓ CCW Speed 3");
+      Serial.println("✓ CCW Speed 3 (220 PWM)");
     }
     else if(cmd == "CCW4") {
       setSpeedLevel(DIR_COUNTER_CLOCKWISE, SPEED_4);
-      Serial.println("✓ CCW Speed 4");
+      Serial.println("✓ CCW Speed 4 (255 PWM)");
     }
     else if(cmd == "S" || cmd == "STOP") {
       motorStop();
       Serial.println("🛑 Motor STOPPED");
     }
     
-    // ===== PID MOVE COMMANDS =====
-    else if(cmd.startsWith("M")) {
-      float deg = cmd.substring(1).toFloat();
-      API_moveByDegrees(deg);
-    }
-    else if(cmd.startsWith("A")) {
-      float deg = cmd.substring(1).toFloat();
-      API_moveToAbsoluteDegrees(deg);
-    }
-    else if(cmd.startsWith("R")) {
-      float revs = cmd.substring(1).toFloat();
-      API_moveRevolutions(revs);
-    }
-    else if(cmd.startsWith("P") && cmd.length() > 1 && isDigit(cmd.charAt(1))) {
-      int64_t pos = cmd.substring(1).toInt();
-      API_moveToAbsolutePosition(pos);
+    // ===== CALIBRATION =====
+    else if(cmd == "CAL") {
+      calibrateMotor();
     }
     
     // ===== PID COMMANDS =====
+    else if(cmd.startsWith("M")) {
+      float deg = cmd.substring(1).toFloat();
+      int64_t pulses = (int64_t)((deg / 360.0) * TOTAL_PULSES_PER_REV);
+      int64_t targetPos = encoder.getCount() + pulses;
+      moveToPositionPID(targetPos);
+    }
+    else if(cmd.startsWith("A")) {
+      float deg = cmd.substring(1).toFloat();
+      int64_t targetPos = (int64_t)((deg / 360.0) * TOTAL_PULSES_PER_REV);
+      moveToPositionPID(targetPos);
+    }
+    else if(cmd.startsWith("R")) {
+      float revs = cmd.substring(1).toFloat();
+      int64_t pulses = (int64_t)(revs * TOTAL_PULSES_PER_REV);
+      int64_t targetPos = encoder.getCount() + pulses;
+      moveToPositionPID(targetPos);
+    }
+    else if(cmd.startsWith("P")) {
+      int64_t pos = cmd.substring(1).toInt();
+      moveToPositionPID(pos);
+    }
     else if(cmd.startsWith("TUNE")) {
       int firstSpace = cmd.indexOf(' ');
       int secondSpace = cmd.indexOf(' ', firstSpace + 1);
@@ -871,34 +714,25 @@ void processSerialCommands() {
           kd = cmd.substring(thirdSpace + 1).toFloat();
         }
         
-        API_tunePID(kp, ki, kd);
+        pid.tune(kp, ki, kd);
       }
     }
-    else if(cmd == "PIDINFO") {
+    else if(cmd == "INFO") {
       pid.printStatus();
       printDetailedStatus();
     }
-    else if(cmd == "PIDSTATUS") {
-      Serial.println(API_getPIDStatus());
-    }
-    
-    // ===== SYSTEM COMMANDS =====
-    else if(cmd == "POS") {
-      Serial.println(API_getCurrentPosition());
-    }
-    else if(cmd == "STATUS") {
-      Serial.println(API_getStatus());
-    }
     else if(cmd == "RESET") {
-      API_resetPosition();
-    }
-    else if(cmd == "I" || cmd == "INFO") {
-      printDetailedStatus();
+      encoder.clearCount();
+      pid.resetPID();
+      pid.moveCount = 0;
+      pid.historyCount = 0;
+      pid.overshootPerRev = 0;
+      pid.crawlSpeedBase = 0;
+      pid.motorIsWarm = false;
+      Serial.println("✅ System reset!");
     }
     else {
-      Serial.println("✗ Unknown command!");
+      Serial.println("❌ Unknown command!");
     }
   }
 }
-
-#endif // FUNCMOTOR_H

@@ -8,6 +8,7 @@
 #include <esp_wifi.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <LittleFS.h>
 #include "MotorController.h"
 
 const char *ssid = "captive";
@@ -21,7 +22,7 @@ const IPAddress gatewayIP(4, 3, 2, 1);
 const IPAddress subnetMask(255, 255, 255, 0);
 const String localIPURL = "http://4.3.2.1";
 
-// ===== COMMAND QUEUE SYSTEM =====
+// ===== COMMAND QUEUE =====
 struct MotorCommandQueue {
   struct Command {
     int motorId;
@@ -51,71 +52,40 @@ struct MotorCommandQueue {
   
   bool isEmpty() { return count == 0; }
   bool isFull() { return count >= 20; }
-  
-  void clear() {
-    head = tail = count = 0;
-  }
+  void clear() { head = tail = count = 0; }
 };
 
 MotorCommandQueue commandQueue;
 
 // ===== WEBSOCKET =====
 AsyncWebSocket ws("/ws");
+
 void broadcastStatus() {
-  // KIỂM TRA MOTORS ĐÃ SẴN SÀNG CHƯA
-  if(!motorsReady || motorCount == 0) {
-    Serial.println("⚠️ Motors not ready, skipping broadcast");
-    return;
-  }
+  if(!motorsReady || motorCount == 0) return;
   
   DynamicJsonDocument doc(2048);
   JsonArray motorsArray = doc.createNestedArray("motors");
   
   for (int i = 0; i < motorCount; i++) {
-    // KIỂM TRA TỪNG MOTOR TRƯỚC KHI TRUY CẬP
-    if(!motors[i].initialized) {
-      Serial.printf("⚠️ Motor %d not initialized, skipping\n", i);
-      continue;
-    }
+    if(!motors[i].initialized) continue;
     
     Motor &m = motors[i];
     JsonObject motor = motorsArray.createNestedObject();
     
     motor["id"] = m.id;
     motor["name"] = m.name;
-    
-    // TRUY CẬP ENCODER AN TOÀN
-    int64_t position = 0;
-    float angle = 0.0;
-    
-    try {
-      position = m.encoder.getCount();
-      angle = motorGetAngle(i);
-    } catch(...) {
-      Serial.printf("⚠️ Error reading Motor %d encoder\n", i);
-      position = 0;
-      angle = 0.0;
-    }
-    
-    motor["position"] = (long)position;
-    motor["angle"] = angle;
+    motor["position"] = (long)m.encoder.getCount();
+    motor["angle"] = motorGetAngle(i);
     motor["rpm"] = m.motorRPM;
     motor["direction"] = (int)m.currentDir;
     motor["speed"] = (int)m.currentSpeed;
-    motor["jogMode"] = m.jogMode;
+    motor["ppr"] = m.pulsesPerRev;
     
     JsonObject pid = motor.createNestedObject("pid");
-    pid["moves"] = m.pid.moveCount;
-    pid["overshoot"] = m.pid.overshootPerRev;
-    pid["crawlBase"] = m.pid.crawlSpeedBase;
     pid["kp"] = m.pid.Kp;
     pid["ki"] = m.pid.Ki;
     pid["kd"] = m.pid.Kd;
-    
-    JsonObject limits = motor.createNestedObject("limits");
-    limits["enabled"] = m.softLimitsEnabled;
-    limits["min"] = (long)m.softLimitMin;
-    limits["max"] = (long)m.softLimitMax;
+    pid["moves"] = m.pid.moveCount;
   }
   
   doc["queue"] = commandQueue.count;
@@ -128,22 +98,17 @@ void broadcastStatus() {
 void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
                       AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if(type == WS_EVT_CONNECT) {
-    Serial.printf("WebSocket client #%u connected\n", client->id());
+    Serial.printf("WebSocket #%u connected\n", client->id());
     broadcastStatus();
   } 
   else if(type == WS_EVT_DISCONNECT) {
-    Serial.printf("WebSocket client #%u disconnected\n", client->id());
+    Serial.printf("WebSocket #%u disconnected\n", client->id());
   }
   else if(type == WS_EVT_DATA) {
     AwsFrameInfo *info = (AwsFrameInfo*)arg;
     if(info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-      // data[len] = 0;
-      // String message = (char*)data;
-      String message = String((const char*)data, len); 
-      
-      // JsonDocument doc;
-      // DynamicJsonDocument doc(4096);
-      StaticJsonDocument<256> doc; 
+      String message = String((const char*)data, len);
+      StaticJsonDocument<256> doc;
       DeserializationError error = deserializeJson(doc, message);
       
       if(!error) {
@@ -151,11 +116,10 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         String cmd = doc["command"].as<String>();
         
         if(motorId >= motorCount) {
-          client->text("{\"status\":\"error\",\"message\":\"Invalid motor ID\"}");
+          client->text("{\"status\":\"error\"}");
           return;
         }
         
-        // Immediate commands (don't queue)
         if(cmd == "STOP") {
           motorStop(motorId);
           commandQueue.clear();
@@ -163,7 +127,6 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           return;
         }
         
-        // Jog commands
         if(cmd.startsWith("JOG_CW:")) {
           int speed = cmd.substring(7).toInt();
           motorStartJog(motorId, DIR_CLOCKWISE, (SpeedLevel)speed);
@@ -182,26 +145,6 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           return;
         }
         
-        // Soft limits
-        if(cmd.startsWith("LIMITS:")) {
-          int colonPos = cmd.indexOf(':', 7);
-          if(colonPos > 0) {
-            int64_t min = cmd.substring(7, colonPos).toInt();
-            int64_t max = cmd.substring(colonPos + 1).toInt();
-            motors[motorId].softLimitMin = min;
-            motors[motorId].softLimitMax = max;
-            motors[motorId].softLimitsEnabled = true;
-            client->text("{\"status\":\"limits_set\"}");
-          }
-          return;
-        }
-        if(cmd == "LIMITS_OFF") {
-          motors[motorId].softLimitsEnabled = false;
-          client->text("{\"status\":\"limits_disabled\"}");
-          return;
-        }
-        
-        // PID tuning
         if(cmd.startsWith("TUNE:")) {
           int firstColon = cmd.indexOf(':', 5);
           int secondColon = cmd.indexOf(':', firstColon + 1);
@@ -214,460 +157,302 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           }
           return;
         }
-        if(cmd == "PID_RESET") {
-          motors[motorId].pid.reset();
-          motors[motorId].pid.resetLearning();
-          client->text("{\"status\":\"pid_reset\"}");
+        
+        if(cmd == "RESET") {
+          motorZeroPosition(motorId);
+          client->text("{\"status\":\"reset\"}");
           return;
         }
         
         // Queue move commands
         if(commandQueue.push(motorId, cmd)) {
-          client->text("{\"status\":\"queued\",\"queue\":" + String(commandQueue.count) + "}");
-          Serial.printf("📥 Queued M%d: %s (queue: %d)\n", motorId, cmd.c_str(), commandQueue.count);
+          client->text("{\"status\":\"queued\"}");
         } else {
-          client->text("{\"status\":\"error\",\"message\":\"Queue full\"}");
-          Serial.println("❌ Queue full!");
+          client->text("{\"status\":\"queue_full\"}");
         }
       }
     }
   }
 }
-
 const char index_html[] PROGMEM = R"=====(
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Multi-Motor Control</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <style>
-    * { 
-      margin: 0; 
-      padding: 0; 
-      box-sizing: border-box;
-      -webkit-tap-highlight-color: transparent;
-    }
-    body { 
-      font-family: Arial, sans-serif;
-      background: #f5f5f5;
-      padding: 10px;
-    }
-    .container { 
-      max-width: 1200px; 
-      margin: 0 auto; 
-    }
-    .header {
-      background: #333;
-      color: white;
-      padding: 15px;
-      text-align: center;
-      border-radius: 8px 8px 0 0;
-      margin-bottom: 15px;
-    }
-    .header h2 { 
-      font-size: 20px;
-      margin-bottom: 5px;
-    }
-    .status-line {
-      font-size: 13px;
-      margin-top: 5px;
-    }
-    .dot {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 5px;
-    }
-    .dot.connected { background: #4CAF50; }
-    .dot.disconnected { background: #f44336; }
-    
-    .motor-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-      gap: 15px;
-    }
-    
-    .motor-card {
-      background: white;
-      border-radius: 8px;
-      padding: 15px;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    .motor-header {
-      font-size: 18px;
-      font-weight: bold;
-      margin-bottom: 15px;
-      padding-bottom: 10px;
-      border-bottom: 2px solid #2196F3;
-      color: #333;
-    }
-    
-    .info-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin-bottom: 15px;
-    }
-    .info-box {
-      background: #f9f9f9;
-      padding: 8px;
-      border-radius: 5px;
-      border: 1px solid #e0e0e0;
-    }
-    .info-label {
-      font-size: 10px;
-      color: #666;
-      margin-bottom: 2px;
-    }
-    .info-value {
-      font-size: 16px;
-      font-weight: bold;
-      color: #333;
-    }
-    
-    .control-group {
-      margin-bottom: 10px;
-    }
-    
-    input[type="number"] {
-      width: 100%;
-      padding: 10px;
-      font-size: 14px;
-      border: 1px solid #ccc;
-      border-radius: 5px;
-      margin-bottom: 5px;
-    }
-    
-    .btn {
-      padding: 10px 15px;
-      font-size: 14px;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-      width: 100%;
-      margin-bottom: 5px;
-      transition: background 0.2s;
-      font-weight: bold;
-    }
-    .btn-primary { background: #2196F3; color: white; }
-    .btn-primary:active { background: #1976D2; }
-    .btn-success { background: #4CAF50; color: white; }
-    .btn-success:active { background: #388E3C; }
-    .btn-danger { background: #f44336; color: white; }
-    .btn-danger:active { background: #d32f2f; }
-    .btn-secondary { background: #9E9E9E; color: white; }
-    .btn-secondary:active { background: #757575; }
-    
-    .quick-grid {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 5px;
-      margin-bottom: 10px;
-    }
-    .quick-btn {
-      padding: 8px;
-      font-size: 12px;
-      border: none;
-      border-radius: 5px;
-      background: #2196F3;
-      color: white;
-      cursor: pointer;
-      font-weight: bold;
-    }
-    .quick-btn:active { background: #1976D2; }
-    
-    .jog-controls {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    .jog-btn {
-      padding: 30px 15px;
-      font-size: 16px;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-weight: bold;
-      transition: all 0.2s;
-    }
-    .jog-cw {
-      background: #FF9800;
-      color: white;
-    }
-    .jog-cw:active { 
-      background: #F57C00;
-      transform: scale(0.95);
-    }
-    .jog-ccw {
-      background: #9C27B0;
-      color: white;
-    }
-    .jog-ccw:active { 
-      background: #7B1FA2;
-      transform: scale(0.95);
-    }
-    
-    .pid-info {
-      background: #e3f2fd;
-      padding: 8px;
-      border-radius: 5px;
-      border-left: 3px solid #2196F3;
-      margin-top: 10px;
-      font-size: 11px;
-    }
-    .pid-param {
-      display: flex;
-      justify-content: space-between;
-      margin: 2px 0;
-    }
-    
-    .toast {
-      position: fixed;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #323232;
-      color: white;
-      padding: 12px 24px;
-      border-radius: 5px;
-      font-size: 14px;
-      opacity: 0;
-      transition: opacity 0.3s;
-      z-index: 1000;
-    }
-    .toast.show {
-      opacity: 1;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Motor Control</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#f5f5f5;padding:8px}
+.container{max-width:1400px;margin:0 auto}
+.header{background:#333;color:#fff;padding:10px;text-align:center;margin-bottom:8px;border-radius:4px;font-size:18px}
+.status{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+.on{background:#4CAF50}.off{background:#f44336}
+.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tab{flex:1;padding:8px;background:#666;color:#fff;border:none;cursor:pointer;border-radius:4px;font-weight:bold;font-size:14px}
+.tab.active{background:#2196F3}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px}
+.card{background:#fff;padding:10px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}
+.title{font-weight:bold;margin-bottom:8px;padding-bottom:5px;border-bottom:2px solid #2196F3;font-size:15px}
+.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}
+.label{color:#666}
+.value{font-weight:bold}
+input,textarea{width:100%;padding:6px;border:1px solid #ccc;border-radius:3px;font-size:13px;margin-bottom:4px}
+textarea{font-family:monospace;height:250px;resize:vertical}
+.btn{width:100%;padding:8px;border:none;border-radius:3px;cursor:pointer;font-weight:bold;margin-bottom:4px;font-size:13px}
+.blue{background:#2196F3;color:#fff}
+.green{background:#4CAF50;color:#fff}
+.red{background:#f44336;color:#fff}
+.orange{background:#FF9800;color:#fff}
+.purple{background:#9C27B0;color:#fff}
+.gray{background:#999;color:#fff}
+.btns{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:4px}
+.btn-sm{padding:6px;background:#2196F3;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:12px}
+.jog{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px}
+.jog-btn{padding:20px;border:none;border-radius:4px;cursor:pointer;font-weight:bold;font-size:14px}
+.cfg-item{margin-bottom:8px}
+.cfg-item label{display:block;font-size:12px;color:#666;margin-bottom:3px}
+.cfg-item input{margin-bottom:0}
+.inline{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px}
+</style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h2>🎛️ Multi-Motor Control System</h2>
-      <div class="status-line">
-        <span class="dot" id="wsStatus"></span>
-        <span id="connectionStatus">Connecting...</span>
-      </div>
-    </div>
-    
-    <div class="motor-grid" id="motorGrid">
-      <!-- Motors will be generated here -->
-    </div>
-  </div>
-  
-  <div class="toast" id="toast"></div>
-  
-  <script>
-    let ws;
-    let reconnectTimer;
-    let motors = [];
-    
-    function connectWebSocket() {
-      ws = new WebSocket('ws://4.3.2.1/ws');
-      
-      ws.onopen = () => {
-        console.log('WebSocket connected');
-        document.getElementById('connectionStatus').textContent = 'Connected';
-        document.getElementById('wsStatus').className = 'dot connected';
-        clearTimeout(reconnectTimer);
-      };
-      
-      ws.onclose = () => {
-        console.log('WebSocket disconnected');
-        document.getElementById('connectionStatus').textContent = 'Disconnected';
-        document.getElementById('wsStatus').className = 'dot disconnected';
-        reconnectTimer = setTimeout(connectWebSocket, 2000);
-      };
-      
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-      };
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if(data.motors) {
-            motors = data.motors;
-            if(document.getElementById('motorGrid').children.length === 0) {
-              renderMotors();
-            }
-            updateDisplay(data);
-          }
-        } catch(e) {
-          console.error('Parse error:', e);
-        }
-      };
-    }
-    
-    function renderMotors() {
-      const grid = document.getElementById('motorGrid');
-      grid.innerHTML = motors.map((m, idx) => `
-        <div class="motor-card">
-          <div class="motor-header">⚙️ ${m.name}</div>
-          
-          <div class="info-grid">
-            <div class="info-box">
-              <div class="info-label">Position</div>
-              <div class="info-value" id="pos-${m.id}">0</div>
-            </div>
-            <div class="info-box">
-              <div class="info-label">Angle</div>
-              <div class="info-value" id="angle-${m.id}">0°</div>
-            </div>
-            <div class="info-box">
-              <div class="info-label">RPM</div>
-              <div class="info-value" id="rpm-${m.id}">0</div>
-            </div>
-            <div class="info-box">
-              <div class="info-label">PWM</div>
-              <div class="info-value" id="pwm-${m.id}">0</div>
-            </div>
-          </div>
-          
-          <div class="pid-info">
-            <div class="pid-param">
-              <span>Moves:</span>
-              <span id="pid-moves-${m.id}">0</span>
-            </div>
-            <div class="pid-param">
-              <span>Overshoot:</span>
-              <span id="pid-overshoot-${m.id}">0</span>
-            </div>
-            <div class="pid-param">
-              <span>Kp|Ki|Kd:</span>
-              <span id="pid-gains-${m.id}">-|-|-</span>
-            </div>
-          </div>
-          
-          <div class="control-group">
-            <div class="quick-grid">
-              <button class="quick-btn" onclick="quick(${m.id}, -90)">-90°</button>
-              <button class="quick-btn" onclick="quick(${m.id}, -45)">-45°</button>
-              <button class="quick-btn" onclick="quick(${m.id}, 45)">+45°</button>
-              <button class="quick-btn" onclick="quick(${m.id}, 90)">+90°</button>
-            </div>
-          </div>
-          
-          <div class="control-group">
-            <input type="number" id="deg-${m.id}" placeholder="Degrees">
-            <button class="btn btn-primary" onclick="moveBy(${m.id})">Move By</button>
-          </div>
-          
-          <div class="control-group">
-            <input type="number" id="angle-${m.id}" placeholder="Target Angle">
-            <button class="btn btn-success" onclick="moveTo(${m.id})">Go To</button>
-          </div>
-          
-          <div class="jog-controls">
-            <button class="jog-btn jog-cw" 
-              ontouchstart="jogStart(${m.id}, 'CW')" ontouchend="jogStop(${m.id})"
-              onmousedown="jogStart(${m.id}, 'CW')" onmouseup="jogStop(${m.id})">
-              CW ▶
-            </button>
-            <button class="jog-btn jog-ccw" 
-              ontouchstart="jogStart(${m.id}, 'CCW')" ontouchend="jogStop(${m.id})"
-              onmousedown="jogStart(${m.id}, 'CCW')" onmouseup="jogStop(${m.id})">
-              ◀ CCW
-            </button>
-          </div>
-          
-          <button class="btn btn-danger" onclick="stop(${m.id})">🛑 STOP</button>
-          <button class="btn btn-secondary" onclick="reset(${m.id})">🔄 Reset</button>
-        </div>
-      `).join('');
-    }
-    
-    function updateDisplay(data) {
-      data.motors.forEach(m => {
-        const pos = document.getElementById('pos-' + m.id);
-        const angle = document.getElementById('angle-' + m.id);
-        const rpm = document.getElementById('rpm-' + m.id);
-        const pwm = document.getElementById('pwm-' + m.id);
-        
-        if(pos) pos.textContent = m.position;
-        if(angle) angle.textContent = m.angle.toFixed(1) + '°';
-        if(rpm) rpm.textContent = m.rpm.toFixed(1);
-        if(pwm) pwm.textContent = m.speed;
-        
-        if(m.pid) {
-          const moves = document.getElementById('pid-moves-' + m.id);
-          const overshoot = document.getElementById('pid-overshoot-' + m.id);
-          const gains = document.getElementById('pid-gains-' + m.id);
-          
-          if(moves) moves.textContent = m.pid.moves;
-          if(overshoot) overshoot.textContent = m.pid.overshoot.toFixed(1);
-          if(gains) gains.textContent = 
-            m.pid.kp.toFixed(1) + '|' + 
-            m.pid.ki.toFixed(3) + '|' + 
-            m.pid.kd.toFixed(1);
-        }
-      });
-    }
-    
-    function sendCommand(motorId, cmd) {
-      if(ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({motor_id: motorId, command: cmd}));
-      } else {
-        showToast('Not connected!');
-      }
-    }
-    
-    function showToast(message) {
-      const toast = document.getElementById('toast');
-      toast.textContent = message;
-      toast.classList.add('show');
-      setTimeout(() => toast.classList.remove('show'), 2000);
-    }
-    
-    function moveBy(id) {
-      const input = document.getElementById('deg-' + id);
-      const deg = input.value;
-      if(deg) {
-        sendCommand(id, 'M' + deg);
-        input.value = '';
-        showToast('M' + id + ': Moving ' + deg + '°');
-      }
-    }
-    
-    function moveTo(id) {
-      const input = document.getElementById('angle-' + id);
-      const angle = input.value;
-      if(angle) {
-        sendCommand(id, 'A' + angle);
-        input.value = '';
-        showToast('M' + id + ': Going to ' + angle + '°');
-      }
-    }
-    
-    function quick(id, deg) {
-      sendCommand(id, 'M' + deg);
-      showToast('M' + id + ': ' + deg + '°');
-    }
-    
-    function stop(id) {
-      sendCommand(id, 'STOP');
-      showToast('M' + id + ' STOPPED');
-    }
-    
-    function reset(id) {
-      sendCommand(id, 'RESET');
-      showToast('M' + id + ' Reset');
-    }
-    
-    function jogStart(id, dir) {
-      sendCommand(id, 'JOG_' + dir + ':2');
-    }
-    
-    function jogStop(id) {
-      sendCommand(id, 'JOG_STOP');
-    }
-    
-    connectWebSocket();
-  </script>
+<div class="container">
+<div class="header">
+⚙️ Motor Control
+<div style="font-size:12px;margin-top:5px"><span class="status off" id="st"></span><span id="txt">Connecting...</span></div>
+</div>
+
+<div class="tabs">
+<button class="tab active" onclick="showTab(0)">Control</button>
+<button class="tab" onclick="showTab(1)">Config</button>
+</div>
+
+<div id="tab0" class="tab-content active">
+<div class="grid" id="motors"></div>
+</div>
+
+<div id="tab1" class="tab-content">
+<div class="grid">
+<div class="card">
+<div class="title">Motor Settings</div>
+<div id="settings"></div>
+</div>
+<div class="card">
+<div class="title">JSON Editor</div>
+<textarea id="json"></textarea>
+<button class="btn blue" onclick="save()">💾 Save to ESP32</button>
+<button class="btn gray" onclick="load()">🔄 Reload</button>
+</div>
+</div>
+</div>
+
+</div>
+
+<script>
+let ws,motors=[],cfg={};
+
+function showTab(n){
+document.querySelectorAll('.tab-content').forEach((t,i)=>t.classList.toggle('active',i===n));
+document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',i===n));
+if(n===1)load();
+}
+
+function connectWS(){
+ws=new WebSocket('ws://4.3.2.1/ws');
+ws.onopen=()=>{
+document.getElementById('st').className='status on';
+document.getElementById('txt').textContent='Connected';
+};
+ws.onclose=()=>{
+document.getElementById('st').className='status off';
+document.getElementById('txt').textContent='Disconnected';
+setTimeout(connectWS,2000);
+};
+ws.onmessage=(e)=>{
+const d=JSON.parse(e.data);
+if(d.motors){
+motors=d.motors;
+if(!document.getElementById('motors').innerHTML)renderMotors();
+updateMotors(d);
+}
+};
+}
+
+function renderMotors(){
+document.getElementById('motors').innerHTML=motors.map(m=>`
+<div class="card">
+<div class="title">⚙️ ${m.name}</div>
+<div class="row"><span class="label">Position</span><span class="value" id="p${m.id}">0</span></div>
+<div class="row"><span class="label">Angle</span><span class="value" id="a${m.id}">0°</span></div>
+<div class="row"><span class="label">RPM</span><span class="value" id="r${m.id}">0</span></div>
+<div class="row"><span class="label">PPR</span><span class="value">${m.ppr}</span></div>
+<div class="btns">
+<button class="btn-sm" onclick="q(${m.id},-90)">-90°</button>
+<button class="btn-sm" onclick="q(${m.id},-45)">-45°</button>
+<button class="btn-sm" onclick="q(${m.id},45)">+45°</button>
+<button class="btn-sm" onclick="q(${m.id},90)">+90°</button>
+</div>
+<input type="number" id="d${m.id}" placeholder="Degrees">
+<button class="btn blue" onclick="moveBy(${m.id})">Move By</button>
+<input type="number" id="g${m.id}" placeholder="Target Angle">
+<button class="btn green" onclick="moveTo(${m.id})">Go To</button>
+<div class="jog">
+<button class="jog-btn orange" onmousedown="jog(${m.id},'CW',1)" onmouseup="jog(${m.id},'CW',0)" ontouchstart="jog(${m.id},'CW',1)" ontouchend="jog(${m.id},'CW',0)">CW ▶</button>
+<button class="jog-btn purple" onmousedown="jog(${m.id},'CCW',1)" onmouseup="jog(${m.id},'CCW',0)" ontouchstart="jog(${m.id},'CCW',1)" ontouchend="jog(${m.id},'CCW',0)">◀ CCW</button>
+</div>
+<button class="btn red" onclick="stop(${m.id})">🛑 STOP</button>
+<button class="btn gray" onclick="reset(${m.id})">🔄 Reset</button>
+</div>
+`).join('');
+}
+
+function updateMotors(d){
+d.motors.forEach(m=>{
+const p=document.getElementById('p'+m.id);
+const a=document.getElementById('a'+m.id);
+const r=document.getElementById('r'+m.id);
+if(p)p.textContent=m.position;
+if(a)a.textContent=m.angle.toFixed(1)+'°';
+if(r)r.textContent=m.rpm.toFixed(1);
+});
+}
+
+function send(id,cmd){
+if(ws&&ws.readyState===WebSocket.OPEN){
+ws.send(JSON.stringify({motor_id:id,command:cmd}));
+}
+}
+
+function moveBy(id){
+const v=document.getElementById('d'+id).value;
+if(v){send(id,'M'+v);document.getElementById('d'+id).value='';}
+}
+
+function moveTo(id){
+const v=document.getElementById('g'+id).value;
+if(v){send(id,'A'+v);document.getElementById('g'+id).value='';}
+}
+
+function q(id,deg){send(id,'M'+deg);}
+function stop(id){send(id,'STOP');}
+function reset(id){send(id,'RESET');}
+
+function jog(id,dir,start){
+if(start)send(id,'JOG_'+dir+':2');
+else send(id,'JOG_STOP');
+}
+
+function load(){
+fetch('/config.json')
+.then(r=>r.text())
+.then(t=>{
+try{
+cfg=JSON.parse(t);
+document.getElementById('json').value=JSON.stringify(cfg,null,2);
+renderSettings();
+fetch('/reload-motors')
+.then(r=>r.text())
+.then(msg=>console.log(msg));
+}catch(e){
+document.getElementById('json').value=t;
+}
+});
+}
+
+function renderSettings(){
+if(!cfg.motors)return;
+document.getElementById('settings').innerHTML=cfg.motors.map((m,i)=>`
+<div style="border:1px solid #ddd;padding:8px;margin-bottom:8px;border-radius:4px">
+<div style="font-weight:bold;margin-bottom:6px">${m.name}</div>
+<div class="cfg-item">
+<label>Name</label>
+<input type="text" value="${m.name}" onchange="upd(${i},'name',this.value)">
+</div>
+<div class="cfg-item">
+<label>PPR (Pulses Per Rev)</label>
+<input type="number" value="${m.encoder.pulses_per_rev}" onchange="upd(${i},'ppr',+this.value)">
+</div>
+<div class="cfg-item">
+<label>PID Gains (Kp | Ki | Kd)</label>
+<div class="inline">
+<input type="number" step="0.1" value="${m.pid.kp}" onchange="upd(${i},'kp',+this.value)" placeholder="Kp">
+<input type="number" step="0.001" value="${m.pid.ki}" onchange="upd(${i},'ki',+this.value)" placeholder="Ki">
+<input type="number" step="0.1" value="${m.pid.kd}" onchange="upd(${i},'kd',+this.value)" placeholder="Kd">
+</div>
+</div>
+<div class="cfg-item">
+<label>Pins (EN | R_PWM | L_PWM)</label>
+<div class="inline">
+<input type="number" value="${m.pins.rl_en}" onchange="upd(${i},'en',+this.value)" placeholder="EN">
+<input type="number" value="${m.pins.r_pwm}" onchange="upd(${i},'rpwm',+this.value)" placeholder="R">
+<input type="number" value="${m.pins.l_pwm}" onchange="upd(${i},'lpwm',+this.value)" placeholder="L">
+</div>
+</div>
+<div class="cfg-item">
+<label>Encoder Pins (C1 | C2)</label>
+<div class="inline">
+<input type="number" value="${m.pins.enc_c1}" onchange="upd(${i},'c1',+this.value)" placeholder="C1">
+<input type="number" value="${m.pins.enc_c2}" onchange="upd(${i},'c2',+this.value)" placeholder="C2">
+<span></span>
+</div>
+</div>
+<div class="cfg-item">
+<label>Soft Limits (Min | Max)</label>
+<div class="inline">
+<input type="number" value="${m.limits.soft_min}" onchange="upd(${i},'min',+this.value)" placeholder="Min">
+<input type="number" value="${m.limits.soft_max}" onchange="upd(${i},'max',+this.value)" placeholder="Max">
+<span></span>
+</div>
+</div>
+</div>
+`).join('');
+}
+
+function upd(idx,key,val){
+const m=cfg.motors[idx];
+if(key==='name')m.name=val;
+else if(key==='ppr')m.encoder.pulses_per_rev=val;
+else if(key==='kp')m.pid.kp=val;
+else if(key==='ki')m.pid.ki=val;
+else if(key==='kd')m.pid.kd=val;
+else if(key==='en')m.pins.rl_en=val;
+else if(key==='rpwm')m.pins.r_pwm=val;
+else if(key==='lpwm')m.pins.l_pwm=val;
+else if(key==='c1')m.pins.enc_c1=val;
+else if(key==='c2')m.pins.enc_c2=val;
+else if(key==='min')m.limits.soft_min=val;
+else if(key==='max')m.limits.soft_max=val;
+document.getElementById('json').value=JSON.stringify(cfg,null,2);
+}
+
+function save(){
+const txt=document.getElementById('json').value;
+try{
+cfg=JSON.parse(txt);
+fetch('/save-config',{method:'POST',body:txt})
+.then(r=>r.text())
+.then(msg=>{
+alert(msg);
+return fetch('/reload-motors');
+})
+.then(r=>r.text())
+.then(msg=>{
+alert(msg);
+setTimeout(()=>location.reload(),500);
+});
+}catch(e){
+alert('Invalid JSON: '+e.message);
+}
+}
+
+connectWS();
+setInterval(()=>{
+if(ws&&ws.readyState===WebSocket.OPEN)ws.send('{"ping":1}');
+},1000);
+</script>
 </body>
 </html>
 )=====";
@@ -676,7 +461,6 @@ DNSServer dnsServer;
 AsyncWebServer server(80);
 
 void setUpDNSServer(DNSServer &dnsServer, const IPAddress &localIP) {
-  #define DNS_INTERVAL 30
   dnsServer.setTTL(3600);
   dnsServer.start(53, "*", localIP);
 }
@@ -689,7 +473,6 @@ void startSoftAccessPoint(const char *ssid, const char *password, const IPAddres
 }
 
 void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP) {
-  // Captive portal redirects
   server.on("/connecttest.txt", [](AsyncWebServerRequest *request) { request->redirect("http://logout.net"); });
   server.on("/wpad.dat", [](AsyncWebServerRequest *request) { request->send(404); });
   server.on("/generate_204", [](AsyncWebServerRequest *request) { request->redirect(localIPURL); });
@@ -700,25 +483,116 @@ void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP) {
   server.on("/ncsi.txt", [](AsyncWebServerRequest *request) { request->redirect(localIPURL); });
   server.on("/favicon.ico", [](AsyncWebServerRequest *request) { request->send(404); });
 
-  // Main page
   server.on("/", HTTP_ANY, [](AsyncWebServerRequest *request) {
-    AsyncWebServerResponse *response = request->beginResponse(200, "text/html", index_html);
-    response->addHeader("Cache-Control", "public,max-age=31536000");
-    request->send(response);
+    request->send_P(200, "text/html", index_html);
   });
+
+  server.on("/config.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if(LittleFS.exists("/config.json")) {
+      request->send(LittleFS, "/config.json", "application/json");
+    } else {
+      request->send(404, "text/plain", "Config not found");
+    }
+  });
+
+  server.on("/save-config", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      static String configData = "";
+      
+      if(index == 0) {
+        configData = "";
+      }
+      
+      for(size_t i = 0; i < len; i++) {
+        configData += (char)data[i];
+      }
+      
+      if(index + len == total) {
+        // Validate JSON
+        DynamicJsonDocument doc(4096);
+        DeserializationError error = deserializeJson(doc, configData);
+        
+        if(error) {
+          request->send(400, "text/plain", "Invalid JSON");
+          configData = "";
+          return;
+        }
+        
+        // Save to LittleFS
+        File file = LittleFS.open("/config.json", "w");
+        if(!file) {
+          request->send(500, "text/plain", "Failed to save");
+          configData = "";
+          return;
+        }
+        
+        file.print(configData);
+        file.close();
+
+        // Reload config vào RAM
+        extern SystemConfig sysConfig;
+        if(loadSystemConfig()) {
+          request->send(200, "text/plain", "✅ Config saved & reloaded!");
+          Serial.println("✅ Config reloaded");
+        } else {
+          request->send(500, "text/plain", "Saved but reload failed");
+        }
+
+        configData = "";
+      }
+    });
+    server.on("/reload-motors", HTTP_GET, [](AsyncWebServerRequest *request) {
+      // Stop all motors
+      for(int i = 0; i < motorCount; i++) {
+        if(motors[i].initialized) {
+          motorStop(i);
+        }
+      }
+      
+      delay(100);
+      
+      // Reload config
+      extern SystemConfig sysConfig;
+      if(!loadSystemConfig()) {
+        request->send(500, "text/plain", "Failed to load config");
+        return;
+      }
+      
+      // Clear old motors
+      motorsReady = false;
+      motorCount = 0;
+      
+      // Reinit motors
+      motorCount = sysConfig.motorCount;
+      for(int i = 0; i < motorCount; i++) {
+        MotorConfig &mc = sysConfig.motors[i];
+        
+        motorSetup(
+          i,
+          mc.id, mc.name,
+          mc.pins.rl_en, mc.pins.r_pwm, mc.pins.l_pwm,
+          mc.pins.enc_c1, mc.pins.enc_c2,
+          mc.pulses_per_rev,
+          mc.kp, mc.ki, mc.kd,
+          mc.soft_min, mc.soft_max
+        );
+      }
+      
+      motorsReady = true;
+      
+      request->send(200, "text/plain", "✅ Motors reloaded!");
+      Serial.println("✅ Motors reloaded from config");
+    });
 
   server.onNotFound([](AsyncWebServerRequest *request) {
     request->redirect(localIPURL);
   });
   
-  // WebSocket handler
   ws.onEvent(onWebSocketEvent);
   server.addHandler(&ws);
 }
 
-// ===== COMMAND PROCESSOR =====
 void processCommandQueue() {
-  // ⚠️ CRITICAL - THÊM DÒNG NÀY
   if (!motorsReady) return;
   
   static unsigned long lastProcess = 0;
@@ -732,8 +606,6 @@ void processCommandQueue() {
     command.toUpperCase();
     
     if(motorId >= motorCount) return;
-    
-    Serial.printf("⚙️ Processing M%d: %s (remaining: %d)\n", motorId, command.c_str(), commandQueue.count);
     
     Motor &m = motors[motorId];
     
@@ -771,39 +643,62 @@ void processCommandQueue() {
     else if(command == "RESET") {
       motorZeroPosition(motorId);
     }
-    
-    // Broadcast queue status
-    // JsonDocument doc;
-   StaticJsonDocument<128> doc;
-    doc["queue"] = commandQueue.count;
-    String json;
-    serializeJson(doc, json);
-    ws.textAll(json);
   }
 }
 
-// ===== STATUS BROADCASTER =====
 void broadcastStatusPeriodic() {
   static unsigned long lastBroadcast = 0;
+  static String lastJson = "";
+  
   if(millis() - lastBroadcast > 200) {
     lastBroadcast = millis();
-    broadcastStatus();
+    
+    // Tạo JSON
+    DynamicJsonDocument doc(2048);
+    JsonArray motorsArray = doc.createNestedArray("motors");
+    
+    for (int i = 0; i < motorCount; i++) {
+      if(!motors[i].initialized) continue;
+      Motor &m = motors[i];
+      JsonObject motor = motorsArray.createNestedObject();
+      motor["id"] = m.id;
+      motor["name"] = m.name;
+      motor["position"] = (long)m.encoder.getCount();
+      motor["angle"] = motorGetAngle(i);
+      motor["rpm"] = m.motorRPM;
+      motor["direction"] = (int)m.currentDir;
+      motor["speed"] = (int)m.currentSpeed;
+      motor["ppr"] = m.pulsesPerRev;
+      
+      JsonObject pid = motor.createNestedObject("pid");
+      pid["kp"] = m.pid.Kp;
+      pid["ki"] = m.pid.Ki;
+      pid["kd"] = m.pid.Kd;
+      pid["moves"] = m.pid.moveCount;
+    }
+    
+    doc["queue"] = commandQueue.count;
+    
+    String currentJson;
+    serializeJson(doc, currentJson);
+    
+    // Chỉ broadcast nếu có thay đổi
+    if(currentJson != lastJson) {
+      ws.textAll(currentJson);
+      lastJson = currentJson;
+    }
   }
 }
-
 void WifiPortalsetup() {
-  Serial.println("\n\nMulti-Motor Control Portal with WebSocket");
-  Serial.printf("%s-%d\n\r", ESP.getChipModel(), ESP.getChipRevision());
-
+  Serial.println("\nMulti-Motor Control Portal");
+  
   startSoftAccessPoint(ssid, password, localIP, gatewayIP);
   setUpDNSServer(dnsServer, localIP);
   setUpWebserver(server, localIP);
   server.begin();
   
-  Serial.println("✓ Portal active: " + String(ssid));
+  Serial.println("✓ Portal: " + String(ssid));
   Serial.println("✓ URL: " + localIPURL);
-  Serial.println("✓ WebSocket: ws://4.3.2.1/ws");
-  Serial.printf("Startup Time: %lu ms\n\n", millis());
 }
 
 void WifiPortalloop() {

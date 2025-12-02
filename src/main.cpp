@@ -33,9 +33,8 @@ void ledWifiReady() {
 }
 
 void ledUpdate() {
-  // ⚠️ THÊM CHECK NÀY
   if (!motorsReady) {
-    pixels.setPixelColor(0, pixels.Color(255, 255, 0)); // Yellow = not ready
+    pixels.setPixelColor(0, pixels.Color(255, 255, 0));
     pixels.show();
     return;
   }
@@ -65,13 +64,11 @@ void updateMotorRPM() {
   
   if (currentTime - lastUpdate >= 100) {
     for (int i = 0; i < motorCount; i++) {
-      // ⚠️ THÊM KIỂM TRA NÀY
       if (i >= 10 || i >= motorCount) continue;
       if (!motors[i].initialized) continue;
       
       Motor &m = motors[i];
       
-      // ⚠️ THÊM NULL CHECK
       if (m.lastSpeedCheck == 0) {
         m.lastSpeedCheck = currentTime;
         continue;
@@ -110,6 +107,9 @@ void printMotorStatus(int index) {
   Serial.printf("║ Position:     %lld pulses\n", (long long)m.encoder.getCount());
   Serial.printf("║ Angle:        %.2f°\n", motorGetAngle(index));
   Serial.printf("║ RPM:          %.2f\n", m.motorRPM);
+  // 🔍 DEBUG: THÊM DÒNG NÀY
+  Serial.printf("║ PPR:          %d\n", m.pulsesPerRev);
+  Serial.printf("║ Deg/Pulse:    %.6f\n", m.degreesPerPulse);
   Serial.printf("║ Direction:    %s\n", 
     m.currentDir == DIR_CLOCKWISE ? "CW" : 
     m.currentDir == DIR_COUNTER_CLOCKWISE ? "CCW" : "STOP");
@@ -208,9 +208,19 @@ void processSerialCommands() {
   if (input.startsWith("M")) {
     float deg = input.substring(1).toFloat();
     Motor &m = motors[selectedMotor];
+    
+    // 🔍 DEBUG: THÊM CÁC DÒNG NÀY
+    Serial.printf("\n=== M%.1f DEBUG ===\n", deg);
+    Serial.printf("Motor PPR: %d\n", m.pulsesPerRev);
+    Serial.printf("Current pos: %lld\n", (long long)m.encoder.getCount());
+    
     int64_t pulses = (int64_t)((deg / 360.0) * m.pulsesPerRev);
+    Serial.printf("Calculated pulses: %lld\n", (long long)pulses);
+    
     int64_t targetPos = m.encoder.getCount() + pulses;
-    Serial.printf("Motor %d: PID move by %.2f degrees\n", selectedMotor, deg);
+    Serial.printf("Target pos: %lld\n", (long long)targetPos);
+    Serial.println("==================\n");
+    
     motorMovePID(selectedMotor, targetPos);
   }
   else if (input.startsWith("A")) {
@@ -272,6 +282,7 @@ void setup() {
   
   Serial.println("\n╔════════════════════════════════════════╗");
   Serial.println("║   ESP32-S3 Multi-Motor Control System ║");
+  Serial.println("║          DEBUG VERSION                 ║");
   Serial.println("╚════════════════════════════════════════╝");
   
   Serial.println("Initializing LED...");
@@ -311,6 +322,9 @@ void setup() {
     
     MotorConfig &mc = sysConfig.motors[i];
     
+    // 🔍 DEBUG: THÊM CÁC DÒNG NÀY
+    Serial.printf("    Config PPR for M%d: %d\n", i, mc.pulses_per_rev);
+    
     motorSetup(
       i,
       mc.id, mc.name,
@@ -320,6 +334,10 @@ void setup() {
       mc.kp, mc.ki, mc.kd,
       mc.soft_min, mc.soft_max
     );
+    
+    // 🔍 DEBUG: XÁC NHẬN MOTOR STRUCT ĐÃ CẬP NHẬT
+    Serial.printf("    Motor struct PPR for M%d: %d\n", i, motors[i].pulsesPerRev);
+    Serial.printf("    Motor struct deg/pulse: %.6f\n", motors[i].degreesPerPulse);
     
     delay(100);
   }
@@ -331,13 +349,9 @@ void setup() {
   
   Serial.println("\nStarting WiFi Portal...");
   WifiPortalsetup();
-  delay(100);                    // ← THÊM DÒNG NÀY
-  motorsReady = true;            // ← THÊM DÒNG NÀY (DI CHUYỂN XUỐNG ĐÂY)
-  Serial.println("Motors ready!"); // ← THÊM DÒNG NÀY (để debug)
-  // CRITICAL: Set motorsReady AFTER WiFi is up
-  // This prevents WebSocket callbacks from accessing motors before they're stable
   delay(100);
   motorsReady = true;
+  Serial.println("Motors ready!");
   
   ledWifiReady();
   
@@ -346,8 +360,11 @@ void setup() {
   Serial.println("╚════════════════════════════════════════╝");
   Serial.printf("Motors initialized: %d\n", motorCount);
   Serial.printf("WiFi SSID: %s\n", ssid);
-  Serial.println("WiFi Password: [Open Network - No Password]");  // ← SỬA THÀNH NÀY
+  Serial.println("WiFi Password: [Open Network]");
   Serial.println("Web Interface: http://4.3.2.1");
+  Serial.println("\n🔍 DEBUG MODE ACTIVE");
+  Serial.println("Type 'I' to see all motor PPR values");
+  Serial.println("Type 'M90' to test 90° move with debug output");
   Serial.println("\nType 'H' for serial commands help");
   Serial.println("Current motor: 0");
   Serial.println("Ready.\n");
@@ -355,40 +372,29 @@ void setup() {
 
 // ==================== LOOP ====================
 void loop() {
-  // ⚠️ THÊM SAFETY DELAY Ở ĐẦU LOOP
   static bool firstRun = true;
   if (firstRun) {
-    delay(1000);  // Chờ 1 giây sau SYSTEM READY
+    delay(1000);
     firstRun = false;
     Serial.println("Loop started!");
   }
   
-  // Safety check
   if (!motorsReady || motorCount == 0) {
     delay(1000);
     return;
   }
   
-  // WiFi Portal
   WifiPortalloop();
-  
   yield();
-  
-  // Update motor RPM
   updateMotorRPM();
-  
-  // Check soft limits
   motorsCheckAllSoftLimits();
   
-  // Update LED status
   static unsigned long lastLED = 0;
   if (millis() - lastLED >= 50) {
     lastLED = millis();
     ledUpdate();
   }
   
-  // Process serial commands
   processSerialCommands();
-  
   vTaskDelay(1);
 }

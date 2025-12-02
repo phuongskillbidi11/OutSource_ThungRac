@@ -33,7 +33,7 @@ struct PIDController {
   
   float integral_limit = 100.0;
   float d_limit = 50.0;
-  int64_t deadband = 100;
+  int64_t deadband =10;
   
   // PID State
   float error_integral = 0;
@@ -237,8 +237,8 @@ struct Motor {
   int rl_en = 0, r_pwm = 0, l_pwm = 0, enc_c1 = 0, enc_c2 = 0;
   
   ESP32Encoder encoder;
-  int pulsesPerRev = 1356;
-  float degreesPerPulse = 0.265;
+  int pulsesPerRev = 2550;  
+  float degreesPerPulse = 0.141176; 
   
   Direction currentDir = DIR_STOP;
   SpeedLevel currentSpeed = SPEED_STOP;

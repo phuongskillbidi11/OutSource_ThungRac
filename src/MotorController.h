@@ -256,14 +256,15 @@ struct Motor {
   float motorRPM = 0.0;
 };
 
-Motor motors[10];
-int motorCount = 0;
-bool motorsReady = false;  
+extern Motor motors[10];
+extern int motorCount;
+extern bool motorsReady;  
 
-int speedPWM[5] = {0, 64, 128, 192, 255};
+extern int speedPWM[5];
+
 
 // ===== SETUP MOTOR =====
-void motorSetup(int index, int _id, String _name, 
+inline void motorSetup(int index, int _id, String _name, 
                 int _rl_en, int _r_pwm, int _l_pwm, 
                 int _enc_c1, int _enc_c2, 
                 int _ppr, float _kp, float _ki, float _kd,
@@ -334,7 +335,7 @@ void motorSetup(int index, int _id, String _name,
 }
 
 // ===== MOTOR CONTROL =====
-void motorSetPWM(int index, Direction dir, int pwm) {
+inline void motorSetPWM(int index, Direction dir, int pwm) {
   if(index >= motorCount || !motors[index].initialized) return;
   
   Motor &m = motors[index];
@@ -357,7 +358,7 @@ void motorSetPWM(int index, Direction dir, int pwm) {
   }
 }
 
-void motorSetSpeed(int index, Direction dir, SpeedLevel spd) {
+inline void motorSetSpeed(int index, Direction dir, SpeedLevel spd) {
   if(index >= motorCount || !motors[index].initialized) return;
   
   Motor &m = motors[index];
@@ -382,41 +383,40 @@ void motorSetSpeed(int index, Direction dir, SpeedLevel spd) {
   }
 }
 
-void motorStop(int index) {
+inline void motorStop(int index) {
   if(index >= motorCount || !motors[index].initialized) return;
   motorSetSpeed(index, DIR_STOP, SPEED_STOP);
   motors[index].jogMode = false;
 }
 
-void motorStartJog(int index, Direction dir, SpeedLevel spd) {
+inline void motorStartJog(int index, Direction dir, SpeedLevel spd) {
   if(index >= motorCount || !motors[index].initialized) return;
   motors[index].jogMode = true;
   motorSetSpeed(index, dir, spd);
 }
 
-void motorStopJog(int index) {
+inline void motorStopJog(int index) {
   motorStop(index);
 }
 
-float motorGetAngle(int index) {
+inline float motorGetAngle(int index) {
   if(index >= motorCount || !motors[index].initialized) return 0.0;
   Motor &m = motors[index];
   return m.encoder.getCount() * m.degreesPerPulse;
 }
 
-int64_t motorGetPosition(int index) {
+inline int64_t motorGetPosition(int index) { 
   if(index >= motorCount || !motors[index].initialized) return 0;
   return motors[index].encoder.getCount();
 }
-
-void motorZeroPosition(int index) {
+inline void motorZeroPosition(int index) {
   if(index >= motorCount || !motors[index].initialized) return;
   motors[index].encoder.clearCount();
   motors[index].pid.resetLearning();
   Serial.printf("Motor %d zeroed\n", motors[index].id);
 }
 
-void motorCheckSoftLimits(int index) {
+inline void motorCheckSoftLimits(int index) {
   if(index >= motorCount || !motors[index].initialized) return;
   Motor &m = motors[index];
   
@@ -432,7 +432,7 @@ void motorCheckSoftLimits(int index) {
 }
 
 // ===== PID MOVE =====
-void motorMovePID(int index, int64_t targetPulses) {
+inline void motorMovePID(int index, int64_t targetPulses) {
   if(index >= motorCount || !motors[index].initialized) return;
   
   Motor &m = motors[index];
@@ -520,7 +520,7 @@ void motorMovePID(int index, int64_t targetPulses) {
   m.lastEncoderPosition = m.encoder.getCount();
 }
 
-void motorsPrintAllStatus() {
+inline void motorsPrintAllStatus() {
   for (int i = 0; i < motorCount; i++) {
     if(!motors[i].initialized) continue;
     Motor &m = motors[i];
@@ -530,7 +530,7 @@ void motorsPrintAllStatus() {
   }
 }
 
-void motorsCheckAllSoftLimits() {
+inline void motorsCheckAllSoftLimits() {
   for (int i = 0; i < motorCount; i++) {
     motorCheckSoftLimits(i);
   }

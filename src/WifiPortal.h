@@ -10,7 +10,8 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "MotorController.h"
-
+#include "FlowConfig.h"
+#include "FlowController.h" 
 const char *ssid = "captive";
 const char *password = NULL;
 
@@ -98,7 +99,10 @@ void broadcastStatus() {
 void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
                       AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if(type == WS_EVT_CONNECT) {
-    Serial.printf("WebSocket #%u connected\n", client->id());
+    Serial.printf("✓ WS Client #%u connected\n", client->id());
+    if(!motorsReady) {
+      Serial.println("⚠ Motors not ready yet");
+    }
     broadcastStatus();
   } 
   else if(type == WS_EVT_DISCONNECT) {
@@ -228,12 +232,12 @@ textarea{font-family:monospace;height:250px;resize:vertical}
 <div class="tabs">
 <button class="tab active" onclick="showTab(0)">Control</button>
 <button class="tab" onclick="showTab(1)">Config</button>
+<button class="tab" onclick="showTab(2)">Flow</button>
 </div>
 
 <div id="tab0" class="tab-content active">
 <div class="grid" id="motors"></div>
 </div>
-
 <div id="tab1" class="tab-content">
 <div class="grid">
 <div class="card">
@@ -248,18 +252,152 @@ textarea{font-family:monospace;height:250px;resize:vertical}
 </div>
 </div>
 </div>
+<div id="tab2" class="tab-content">  <!-- THÊM TAB MỚI -->
+<div class="grid">
+<div class="card">
+<div class="title">Flow Settings</div>
+<div id="flowsettings"></div>
+</div>
+<div class="card">
+<div class="title">Flow JSON Editor</div>
+<textarea id="flowjson"></textarea>
+<button class="btn blue" onclick="saveFlow()">💾 Save Flow Config</button>
+<button class="btn gray" onclick="loadFlow()">🔄 Reload Flow</button>
+</div>
+</div>
+</div>
 
 </div>
 
 <script>
-let ws,motors=[],cfg={};
+let ws,motors=[],cfg={},flowCfg={}; 
 
 function showTab(n){
 document.querySelectorAll('.tab-content').forEach((t,i)=>t.classList.toggle('active',i===n));
 document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',i===n));
 if(n===1)load();
+if(n===2)loadFlow();
 }
 
+function loadFlow(){
+  fetch('/flow_config.json')
+    .then(r=>r.text())
+    .then(t=>{
+      try{
+        flowCfg=JSON.parse(t);
+        document.getElementById('flowjson').value=JSON.stringify(flowCfg,null,2);
+        renderFlowSettings();
+      }catch(e){
+        console.error('Parse error:', e);
+        document.getElementById('flowjson').value=t;
+      }
+    })
+    .catch(e=>console.error('Fetch error:', e));  // <-- THÊM
+}
+
+function renderFlowSettings(){
+if(!flowCfg.flows)return;
+document.getElementById('flowsettings').innerHTML=flowCfg.flows.map((f,i)=>`
+<div style="border:1px solid #ddd;padding:8px;margin-bottom:8px;border-radius:4px">
+<div style="font-weight:bold;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
+<span>${f.name}</span>
+<button class="btn-sm ${f.enabled?'green':'gray'}" onclick="toggleFlow(${i})">${f.enabled?'ON':'OFF'}</button>
+</div>
+<div class="cfg-item">
+<label>Motor ID</label>
+<input type="number" value="${f.motor_id}" onchange="updFlow(${i},'motor_id',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Sensor Pin</label>
+<input type="number" value="${f.pins.sensor}" onchange="updFlow(${i},'sensor',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Limit Pins (CW | CCW)</label>
+<div class="inline">
+<input type="number" value="${f.pins.limit_cw}" onchange="updFlow(${i},'limit_cw',+this.value)" placeholder="CW">
+<input type="number" value="${f.pins.limit_ccw}" onchange="updFlow(${i},'limit_ccw',+this.value)" placeholder="CCW">
+<span></span>
+</div>
+</div>
+<div class="cfg-item">
+<label>Move Angle (°)</label>
+<input type="number" step="0.1" value="${f.movement.angle}" onchange="updFlow(${i},'angle',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Speed (Min | Max)</label>
+<div class="inline">
+<input type="number" value="${f.movement.min_speed}" onchange="updFlow(${i},'min_speed',+this.value)">
+<input type="number" value="${f.movement.max_speed}" onchange="updFlow(${i},'max_speed',+this.value)">
+<span></span>
+</div>
+</div>
+<div class="cfg-item">
+<label>Timeout (ms)</label>
+<input type="number" value="${f.movement.timeout}" onchange="updFlow(${i},'timeout',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Sensor Clear Time (ms)</label>
+<input type="number" value="${f.sensor.clear_time}" onchange="updFlow(${i},'clear_time',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Debounce Time (ms)</label>
+<input type="number" value="${f.sensor.debounce_time}" onchange="updFlow(${i},'debounce',+this.value)">
+</div>
+<div class="cfg-item">
+<label>PID (Kp | Ki | Kd)</label>
+<div class="inline">
+<input type="number" step="0.1" value="${f.pid.kp}" onchange="updFlow(${i},'kp',+this.value)">
+<input type="number" step="0.001" value="${f.pid.ki}" onchange="updFlow(${i},'ki',+this.value)">
+<input type="number" step="0.1" value="${f.pid.kd}" onchange="updFlow(${i},'kd',+this.value)">
+</div>
+</div>
+</div>
+`).join('');
+}
+
+function toggleFlow(idx){
+flowCfg.flows[idx].enabled=!flowCfg.flows[idx].enabled;
+document.getElementById('flowjson').value=JSON.stringify(flowCfg,null,2);
+renderFlowSettings();
+}
+
+function updFlow(idx,key,val){
+const f=flowCfg.flows[idx];
+if(key==='motor_id')f.motor_id=val;
+else if(key==='sensor')f.pins.sensor=val;
+else if(key==='limit_cw')f.pins.limit_cw=val;
+else if(key==='limit_ccw')f.pins.limit_ccw=val;
+else if(key==='angle')f.movement.angle=val;
+else if(key==='min_speed')f.movement.min_speed=val;
+else if(key==='max_speed')f.movement.max_speed=val;
+else if(key==='timeout')f.movement.timeout=val;
+else if(key==='clear_time')f.sensor.clear_time=val;
+else if(key==='debounce')f.sensor.debounce_time=val;
+else if(key==='kp')f.pid.kp=val;
+else if(key==='ki')f.pid.ki=val;
+else if(key==='kd')f.pid.kd=val;
+document.getElementById('flowjson').value=JSON.stringify(flowCfg,null,2);
+}
+
+function saveFlow(){
+const txt=document.getElementById('flowjson').value;
+try{
+flowCfg=JSON.parse(txt);
+fetch('/save-flow-config',{method:'POST',body:txt})
+.then(r=>r.text())
+.then(msg=>{
+alert(msg);
+return fetch('/reload-flows');
+})
+.then(r=>r.text())
+.then(msg=>{
+alert(msg);
+setTimeout(()=>location.reload(),500);
+});
+}catch(e){
+alert('Invalid JSON: '+e.message);
+}
+}
 function connectWS(){
 ws=new WebSocket('ws://4.3.2.1/ws');
 ws.onopen=()=>{
@@ -582,6 +720,77 @@ void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP) {
       
       request->send(200, "text/plain", "✅ Motors reloaded!");
       Serial.println("✅ Motors reloaded from config");
+    });
+    server.on("/flow_config.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if(LittleFS.exists("/flow_config.json")) {
+      request->send(LittleFS, "/flow_config.json", "application/json");
+    } else {
+      request->send(404, "text/plain", "Flow config not found");
+    }
+  });
+
+  server.on("/save-flow-config", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      static String configData = "";
+      
+      if(index == 0) {
+        configData = "";
+      }
+      
+      for(size_t i = 0; i < len; i++) {
+        configData += (char)data[i];
+      }
+      
+      if(index + len == total) {
+        DynamicJsonDocument doc(4096);
+        DeserializationError error = deserializeJson(doc, configData);
+        
+        if(error) {
+          request->send(400, "text/plain", "Invalid JSON");
+          configData = "";
+          return;
+        }
+        
+        File file = LittleFS.open("/flow_config.json", "w");
+        if(!file) {
+          request->send(500, "text/plain", "Failed to save");
+          configData = "";
+          return;
+        }
+        
+        file.print(configData);
+        file.close();
+
+        if(loadFlowConfig()) {
+          request->send(200, "text/plain", "✅ Flow config saved!");
+          Serial.println("✅ Flow config reloaded");
+        } else {
+          request->send(500, "text/plain", "Saved but reload failed");
+        }
+
+        configData = "";
+      }
+    });
+
+    server.on("/reload-flows", HTTP_GET, [](AsyncWebServerRequest *request) {
+      // Stop all flows
+      for(int i = 0; i < flowSysConfig.flowCount; i++) {
+        disableFlow(i);
+      }
+      
+      delay(100);
+      
+      // Reload flow config
+      if(!loadFlowConfig()) {
+        request->send(500, "text/plain", "Failed to load flow config");
+        return;
+      }
+      
+      // Reinit flows
+      initFlows();
+      
+      request->send(200, "text/plain", "✅ Flows reloaded!");
+      Serial.println("✅ Flows reloaded from config");
     });
 
   server.onNotFound([](AsyncWebServerRequest *request) {

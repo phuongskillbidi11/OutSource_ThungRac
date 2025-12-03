@@ -3,7 +3,8 @@
 #include "SystemConfig.h"
 #include "MotorController.h"
 #include "WifiPortal.h"
-
+#include "FlowConfig.h"  
+#include "FlowController.h"    
 // ==================== LED RGB ====================
 #define RGB_PIN 48
 #define NUM_PIXELS 1
@@ -270,9 +271,38 @@ void processSerialCommands() {
   else if (input == "PIDINFO") {
     motors[selectedMotor].pid.printStatus();
   }
+  else if (input.startsWith("FLOW") && !input.startsWith("FLOWOFF") && !input.startsWith("FLOWINFO") && !input.startsWith("FLOWLIST")) {
+    // FLOW0, FLOW1, etc
+    int flowId = input.substring(4).toInt();
+    enableFlow(flowId);
+  }
+  else if (input.startsWith("FLOWOFF")) {
+    int flowId = input.substring(7).toInt();
+    disableFlow(flowId);
+  }
+  else if (input.startsWith("FLOWINFO")) {
+    if (input.length() > 8) {
+      int flowId = input.substring(8).toInt();
+      printFlowStatus(flowId);
+    } else {
+      // FLOWINFO without number = show all
+      printFlowConfig();
+    }
+  }
+  else if (input == "FLOWLIST") {
+    printFlowConfig();
+  }
+  else if (input == "FLOWSTATUS") {
+    Serial.println("\n╔═══ FLOW STATUS ═══╗");
+    for (int i = 0; i < flowSysConfig.flowCount; i++) {
+      Serial.printf("║ Flow[%d]: %s\n", i, isFlowActive(i) ? "ACTIVE" : "INACTIVE");
+    }
+    Serial.println("╚═══════════════════╝\n");
+  }
   else {
     Serial.println("✗ Unknown command (H for help)");
   }
+
 }
 
 // ==================== SETUP ====================
@@ -292,7 +322,7 @@ void setup() {
   
   Serial.println("Loading system config...");
   if (!loadSystemConfig()) {
-    Serial.println("\n⌀ ERROR: Config failed!");
+    Serial.println("\n ERROR: Config failed!");
     Serial.println("System halted. Check LittleFS and config.json");
     while(1) {
       pixels.setPixelColor(0, pixels.Color(255, 0, 0));
@@ -305,6 +335,12 @@ void setup() {
   }
   
   printSystemConfig();
+  Serial.println("Loading flow config...");
+  if (!loadFlowConfig()) {
+    Serial.println("⚠️ WARNING: Flow config failed!");
+    Serial.println("Flows disabled. System will continue without flows.");
+  }
+  printFlowConfig(); 
   
   // Initialize motors
   Serial.println("Initializing motors...");
@@ -343,10 +379,11 @@ void setup() {
   }
 
   Serial.printf("✓ All %d motors initialized\n", motorCount);
-  
+  Serial.println("\nInitializing flows...");
+  initFlows(); 
+  delay(500);
   // Wait for encoders to stabilize
   delay(500);
-  
   Serial.println("\nStarting WiFi Portal...");
   WifiPortalsetup();
   delay(100);
@@ -388,6 +425,11 @@ void loop() {
   yield();
   updateMotorRPM();
   motorsCheckAllSoftLimits();
+  
+  // THÊM: Process flows
+  for (int i = 0; i < flowSysConfig.flowCount; i++) {
+    processFlow(i);  
+  }
   
   static unsigned long lastLED = 0;
   if (millis() - lastLED >= 50) {

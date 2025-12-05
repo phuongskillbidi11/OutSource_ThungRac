@@ -4,7 +4,8 @@
 #include "MotorController.h"
 #include "WifiPortal.h"
 #include "FlowConfig.h"  
-#include "FlowController.h"    
+#include "FlowController.h"   
+#include "SystemMode.h" 
 // ==================== LED RGB ====================
 #define RGB_PIN 48
 #define NUM_PIXELS 1
@@ -198,6 +199,11 @@ void processSerialCommands() {
       Serial.println("║   I      Info all motors               ║");
       Serial.println("║   A      Stop all motors               ║");
       Serial.println("║   H      This help                     ║");
+      Serial.println("║ System Modes:                          ║");
+      Serial.println("║   MODE     Show current mode           ║");
+      Serial.println("║   MANUAL   Switch to manual control    ║");
+      Serial.println("║   AUTO     Switch to flow automation   ║");
+      Serial.println("║   IDLE     Stop all operations         ║");
       Serial.println("╚════════════════════════════════════════╝\n");
     }
     else {
@@ -299,10 +305,31 @@ void processSerialCommands() {
     }
     Serial.println("╚═══════════════════╝\n");
   }
+    // ===== MODE COMMANDS ===== (THÊM ĐOẠN NÀY)
+  else if (input == "MODE") {
+    printSystemState();
+  }
+  else if (input == "MANUAL") {
+    if(switchToManualMode()) {
+      Serial.println("✅ Switched to MANUAL mode");
+    }
+  }
+  else if (input == "AUTO") {
+    if(switchToAutoMode()) {
+      Serial.println("✅ Switched to AUTO mode");
+    }
+  }
+  else if (input == "IDLE") {
+    if(switchToIdleMode()) {
+      Serial.println("✅ Switched to IDLE mode");
+    }
+  }
+  // ===== END MODE COMMANDS =====
+
   else {
     Serial.println("✗ Unknown command (H for help)");
   }
-
+  
 }
 
 // ==================== SETUP ====================
@@ -368,12 +395,16 @@ void setup() {
       mc.pins.enc_c1, mc.pins.enc_c2,
       mc.pulses_per_rev,
       mc.kp, mc.ki, mc.kd,
-      mc.soft_min, mc.soft_max
-    );
+      mc.soft_min, mc.soft_max,
+        mc.speed_levels , mc.pid_min_output, mc.pid_max_output
+      );
     
     // 🔍 DEBUG: XÁC NHẬN MOTOR STRUCT ĐÃ CẬP NHẬT
     Serial.printf("    Motor struct PPR for M%d: %d\n", i, motors[i].pulsesPerRev);
     Serial.printf("    Motor struct deg/pulse: %.6f\n", motors[i].degreesPerPulse);
+    Serial.printf("    Motor speeds: [%d,%d,%d,%d,%d]\n", 
+      motors[i].speedPWM[0], motors[i].speedPWM[1], motors[i].speedPWM[2],
+      motors[i].speedPWM[3], motors[i].speedPWM[4]);
     
     delay(100);
   }
@@ -426,9 +457,11 @@ void loop() {
   updateMotorRPM();
   motorsCheckAllSoftLimits();
   
-  // THÊM: Process flows
-  for (int i = 0; i < flowSysConfig.flowCount; i++) {
-    processFlow(i);  
+  //Process flows
+  if (sysState.currentMode == MODE_AUTO) {
+    for (int i = 0; i < flowSysConfig.flowCount; i++) {
+      processFlow(i);  
+    }
   }
   
   static unsigned long lastLED = 0;

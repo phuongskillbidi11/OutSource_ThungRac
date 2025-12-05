@@ -1,5 +1,5 @@
 {"version":"1.0","motor_count":3,"motors":[
-{"id":0,"name":"Motor 1","pins":{"rl_en":4,"r_pwm":5,"l_pwm":6,"enc_c1":35,"enc_c2":36},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0},"limits":{"soft_min":-99999,"soft_max":99999}},
-{"id":1,"name":"Motor 2","pins":{"rl_en":7,"r_pwm":8,"l_pwm":9,"enc_c1":37,"enc_c2":38},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0},"limits":{"soft_min":-99999,"soft_max":99999}},
-{"id":2,"name":"Motor 3","pins":{"rl_en":10,"r_pwm":11,"l_pwm":12,"enc_c1":39,"enc_c2":40},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0},"limits":{"soft_min":-99999,"soft_max":99999}}
+{"id":0,"name":"Motor 1","pins":{"rl_en":4,"r_pwm":5,"l_pwm":6,"enc_c1":35,"enc_c2":36},"encoder":{"pulses_per_rev":2833},"pid":{"kp":1.0,"ki":0.0,"kd":0.0,"min_output":195,"max_output":255},"limits":{"soft_min":-99999,"soft_max":99999},"speeds":[0,64,128,192,255]},
+{"id":1,"name":"Motor 2","pins":{"rl_en":7,"r_pwm":8,"l_pwm":9,"enc_c1":37,"enc_c2":38},"encoder":{"pulses_per_rev":2833},"pid":{"kp":1.0,"ki":0.0,"kd":0.0,"min_output":195,"max_output":255},"limits":{"soft_min":-99999,"soft_max":99999},"speeds":[0,64,128,192,255]},
+{"id":2,"name":"Motor 3","pins":{"rl_en":10,"r_pwm":11,"l_pwm":12,"enc_c1":40,"enc_c2":39},"encoder":{"pulses_per_rev":2833},"pid":{"kp":1.0,"ki":0.0,"kd":0.0,"min_output":195,"max_output":255},"limits":{"soft_min":-99999,"soft_max":99999},"speeds":[0,64,128,192,255]}
 ]}

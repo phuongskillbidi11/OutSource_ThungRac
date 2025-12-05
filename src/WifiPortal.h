@@ -12,6 +12,7 @@
 #include "MotorController.h"
 #include "FlowConfig.h"
 #include "FlowController.h" 
+#include "SystemMode.h" 
 const char *ssid = "captive";
 const char *password = NULL;
 
@@ -88,8 +89,12 @@ void broadcastStatus() {
     pid["kd"] = m.pid.Kd;
     pid["moves"] = m.pid.moveCount;
   }
-  
-  doc["queue"] = commandQueue.count;
+  //Mode info
+    doc["system_mode"] = (int)sysState.currentMode;
+    doc["mode_name"] = getCurrentModeString();
+    doc["status_msg"] = sysState.statusMessage;
+    doc["flows_active"] = countActiveFlows();
+    doc["queue"] = commandQueue.count;
   
   String response;
   serializeJson(doc, response);
@@ -121,6 +126,13 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         
         if(motorId >= motorCount) {
           client->text("{\"status\":\"error\"}");
+          return;
+        }
+        // ===== CHECK MODE RESTRICTIONS =====
+        if(sysState.currentMode == MODE_AUTO && 
+           (cmd.startsWith("JOG_") || cmd.startsWith("M") || 
+            cmd.startsWith("A") || cmd.startsWith("R"))) {
+          client->text("{\"status\":\"blocked\",\"message\":\"Manual control disabled in AUTO mode\"}");
           return;
         }
         
@@ -167,6 +179,36 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           client->text("{\"status\":\"reset\"}");
           return;
         }
+        // =====  MODE COMMANDS ===== 
+        if(cmd == "SWITCH_MANUAL") {
+          if(switchToManualMode()) {
+            client->text("{\"status\":\"mode_manual\"}");
+            broadcastStatus();
+          } else {
+            String err = "{\"status\":\"error\",\"message\":\"" + sysState.statusMessage + "\"}";
+            client->text(err);
+          }
+          return;
+        }
+        
+        if(cmd == "SWITCH_AUTO") {
+          if(switchToAutoMode()) {
+            client->text("{\"status\":\"mode_auto\"}");
+            broadcastStatus();
+          } else {
+            String err = "{\"status\":\"error\",\"message\":\"" + sysState.statusMessage + "\"}";
+            client->text(err);
+          }
+          return;
+        }
+        
+        if(cmd == "EMERGENCY_STOP") {
+          switchToIdleMode();
+          client->text("{\"status\":\"emergency_stopped\"}");
+          broadcastStatus();
+          return;
+        }
+        // ===== END MODE COMMANDS =====
         
         // Queue move commands
         if(commandQueue.push(motorId, cmd)) {
@@ -195,6 +237,7 @@ body{font-family:Arial,sans-serif;background:#f5f5f5;padding:8px}
 .tabs{display:flex;gap:4px;margin-bottom:8px}
 .tab{flex:1;padding:8px;background:#666;color:#fff;border:none;cursor:pointer;border-radius:4px;font-weight:bold;font-size:14px}
 .tab.active{background:#2196F3}
+.tab.disabled{background:#444;color:#999;cursor:not-allowed;opacity:0.6}
 .tab-content{display:none}
 .tab-content.active{display:block}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px}
@@ -220,6 +263,106 @@ textarea{font-family:monospace;height:250px;resize:vertical}
 .cfg-item label{display:block;font-size:12px;color:#666;margin-bottom:3px}
 .cfg-item input{margin-bottom:0}
 .inline{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px}
+/* MODE INDICATOR */
+.mode-bar{
+  background:#333;
+  color:#fff;
+  padding:8px 12px;
+  margin-bottom:8px;
+  border-radius:4px;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-size:13px;
+}
+.mode-badge{
+  padding:4px 12px;
+  border-radius:20px;
+  font-weight:bold;
+  font-size:12px;
+}
+.mode-idle{background:#999;color:#fff}
+.mode-manual{background:#FF9800;color:#fff}
+.mode-auto{background:#4CAF50;color:#fff}
+.mode-msg{font-size:11px;color:#ccc;margin-top:2px}
+.btn-mode{padding:6px 12px;background:#2196F3;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;font-weight:bold}
+.btn-emergency{background:#f44336}
+.flow-item{
+  border:1px solid #ddd;
+  padding:10px;
+  margin-bottom:8px;
+  border-radius:4px;
+  background:#f9f9f9;
+}
+.flow-header{
+  display:flex;
+  justify-content:space-between;
+  margin-bottom:8px;
+  padding-bottom:6px;
+  border-bottom:1px solid #ddd;
+}
+.flow-name{
+  font-weight:bold;
+  font-size:14px;
+}
+.flow-badge{
+  padding:3px 8px;
+  border-radius:12px;
+  font-size:11px;
+  font-weight:bold;
+}
+.badge-active{background:#4CAF50;color:#fff}
+.badge-inactive{background:#999;color:#fff}
+.badge-ir{background:#2196F3;color:#fff}
+.badge-touch{background:#9C27B0;color:#fff}
+.flow-info{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:6px;
+  font-size:12px;
+}
+.flow-info-item{
+  display:flex;
+  justify-content:space-between;
+  padding:4px 0;
+}
+.flow-info-label{color:#666}
+.flow-info-value{font-weight:bold}
+.progress-bar{
+  background:#ddd;
+  height:20px;
+  border-radius:10px;
+  overflow:hidden;
+  margin:6px 0;
+  position:relative;
+}
+.progress-fill{
+  background:#4CAF50;
+  height:100%;
+  transition:width 0.3s;
+}
+.progress-text{
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%);
+  font-size:11px;
+  font-weight:bold;
+  color:#333;
+}
+.state-badge{
+  display:inline-block;
+  padding:4px 10px;
+  border-radius:12px;
+  font-size:11px;
+  font-weight:bold;
+  margin-top:6px;
+}
+.state-idle{background:#999;color:#fff}
+.state-wait{background:#FF9800;color:#fff}
+.state-recovery{background:#f44336;color:#fff}
+.state-touch{background:#9C27B0;color:#fff}
+.state-relay{background:#4CAF50;color:#fff}
 </style>
 </head>
 <body>
@@ -228,17 +371,31 @@ textarea{font-family:monospace;height:250px;resize:vertical}
 ⚙️ Motor Control
 <div style="font-size:12px;margin-top:5px"><span class="status off" id="st"></span><span id="txt">Connecting...</span></div>
 </div>
+<div class="mode-bar">
+  <div>
+    <div>
+      <strong>System Mode:</strong> 
+      <span class="mode-badge mode-idle" id="modeBadge">IDLE</span>
+    </div>
+    <div class="mode-msg" id="modeMsg">System ready</div>
+  </div>
+  <div>
+    <button class="btn-mode btn-emergency" onclick="emergencyStop()">
+      🛑 EMERGENCY STOP
+    </button>
+  </div>
+</div>
 
 <div class="tabs">
-<button class="tab active" onclick="showTab(0)">Control</button>
-<button class="tab" onclick="showTab(1)">Config</button>
+<button class="tab" onclick="showTab(0)">Control</button>
+<button class="tab active" onclick="showTab(1)">Config</button>
 <button class="tab" onclick="showTab(2)">Flow</button>
 </div>
 
-<div id="tab0" class="tab-content active">
+<div id="tab0" class="tab-content">
 <div class="grid" id="motors"></div>
 </div>
-<div id="tab1" class="tab-content">
+<div id="tab1" class="tab-content active">
 <div class="grid">
 <div class="card">
 <div class="title">Motor Settings</div>
@@ -254,6 +411,10 @@ textarea{font-family:monospace;height:250px;resize:vertical}
 </div>
 <div id="tab2" class="tab-content">  <!-- THÊM TAB MỚI -->
 <div class="grid">
+<div class="card">
+<div class="title">🔄 Flow Status</div>
+<div id="flowstatus"></div>
+</div>
 <div class="card">
 <div class="title">Flow Settings</div>
 <div id="flowsettings"></div>
@@ -271,12 +432,78 @@ textarea{font-family:monospace;height:250px;resize:vertical}
 
 <script>
 let ws,motors=[],cfg={},flowCfg={}; 
+let selectedMotor=0;
+let sysMode = 0;         
+let lastActiveTab = 1;  
+function updateTabStates() {
+  let tabs = document.querySelectorAll('.tab');
+  
+  // Tab 0 = Control, Tab 1 = Config, Tab 2 = Flow
+  
+  if(sysMode === 1) {
+    // MANUAL mode: Control enabled, Flow disabled
+    tabs[0].classList.remove('disabled');
+    tabs[1].classList.remove('disabled');
+    tabs[2].classList.add('disabled');
+  } else if(sysMode === 2) {
+    // AUTO mode: Control disabled, Flow enabled
+    tabs[0].classList.add('disabled');
+    tabs[1].classList.remove('disabled');
+    tabs[2].classList.remove('disabled');
+  } else {
+    // IDLE mode: All enabled
+    tabs[0].classList.remove('disabled');
+    tabs[1].classList.remove('disabled');
+    tabs[2].classList.remove('disabled');
+  }
+}
 
+function emergencyStop() {
+  if(confirm('EMERGENCY STOP: Stop all motors and flows?')) {
+    ws.send(JSON.stringify({motor_id:0,command:'EMERGENCY_STOP'}));
+  }
+}
 function showTab(n){
-document.querySelectorAll('.tab-content').forEach((t,i)=>t.classList.toggle('active',i===n));
-document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',i===n));
-if(n===1)load();
-if(n===2)loadFlow();
+  // Hide all tabs
+  for(let i=0;i<3;i++){
+    document.getElementById('tab'+i).classList.remove('active');
+    document.querySelectorAll('.tab')[i].classList.remove('active');
+  }
+  
+  // Show selected tab
+  document.getElementById('tab'+n).classList.add('active');
+  document.querySelectorAll('.tab')[n].classList.add('active');
+  
+  // ===== THÊM MODE HANDLING ===== (SAU show selected tab)
+  // Tab 0 = Control (Manual), Tab 1 = Config (No change), Tab 2 = Flow (Auto)
+  if(n === 0) {
+    // Switching to Control tab - request MANUAL mode
+    if(sysMode !== 1) { // 1 = MODE_MANUAL
+      if(confirm('Switch to MANUAL mode? This will stop all flows.')) {
+        ws.send(JSON.stringify({motor_id:0,command:'SWITCH_MANUAL'}));
+      } else {
+        // User cancelled, stay on current tab
+        showTab(lastActiveTab);
+        return;
+      }
+    }
+  } else if(n === 2) {
+    // Switching to Flow tab - request AUTO mode
+    if(sysMode !== 2) { // 2 = MODE_AUTO
+      if(confirm('Switch to AUTO mode? Manual control will be disabled.')) {
+        ws.send(JSON.stringify({motor_id:0,command:'SWITCH_AUTO'}));
+      } else {
+        // User cancelled, stay on current tab
+        showTab(lastActiveTab);
+        return;
+      }
+    }
+  } else if(n === 1) {
+    // Config tab - can stay in any mode
+  }
+  
+  lastActiveTab = n;
+  // ===== END MODE HANDLING =====
 }
 
 function loadFlow(){
@@ -297,6 +524,7 @@ function loadFlow(){
 
 function renderFlowSettings(){
 if(!flowCfg.flows)return;
+updateTabStatus(); // ✅ Update tab status after loading flow config
 document.getElementById('flowsettings').innerHTML=flowCfg.flows.map((f,i)=>`
 <div style="border:1px solid #ddd;padding:8px;margin-bottom:8px;border-radius:4px">
 <div style="font-weight:bold;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
@@ -404,17 +632,41 @@ ws.onopen=()=>{
 document.getElementById('st').className='status on';
 document.getElementById('txt').textContent='Connected';
 };
-ws.onclose=()=>{
-document.getElementById('st').className='status off';
-document.getElementById('txt').textContent='Disconnected';
-setTimeout(connectWS,2000);
-};
-ws.onmessage=(e)=>{
-const d=JSON.parse(e.data);
+ws.onmessage=function(e){
+  let d=JSON.parse(e.data);
+  
+  // ===== THÊM MODE UPDATE ===== (THÊM ĐẦU TIÊN)
+  if(d.system_mode !== undefined) {
+    sysMode = d.system_mode;
+    
+    // Update mode badge
+    let badge = document.getElementById('modeBadge');
+    let msg = document.getElementById('modeMsg');
+    
+    badge.className = 'mode-badge';
+    if(sysMode === 0) {
+      badge.classList.add('mode-idle');
+      badge.textContent = 'IDLE';
+    } else if(sysMode === 1) {
+      badge.classList.add('mode-manual');
+      badge.textContent = 'MANUAL';
+    } else if(sysMode === 2) {
+      badge.classList.add('mode-auto');
+      badge.textContent = 'AUTO';
+    }
+    
+    msg.textContent = d.status_msg || '';
+    
+    // Update tab states based on mode
+    updateTabStates();
+  }
 if(d.motors){
 motors=d.motors;
 if(!document.getElementById('motors').innerHTML)renderMotors();
 updateMotors(d);
+if(d.flows){
+  updateFlowStatus(d.flows);
+}
 }
 };
 }
@@ -457,7 +709,103 @@ if(a)a.textContent=m.angle.toFixed(1)+'°';
 if(r)r.textContent=m.rpm.toFixed(1);
 });
 }
-
+function updateFlowStatus(flows){
+  const statusDiv = document.getElementById('flowstatus');
+  if(!statusDiv) return;
+  
+  if(!flows || flows.length === 0) {
+    statusDiv.innerHTML = '<div style="color:#999;font-size:12px;padding:10px">No flows configured</div>';
+    return;
+  }
+  
+  let html = '';
+  flows.forEach(f => {
+    // State names
+    const stateNames = ['IDLE', 'WAITING', 'RECOVERY', 'TOUCH HOLD', 'RELAY ACTIVE'];
+    const stateName = stateNames[f.state] || 'UNKNOWN';
+    const stateClasses = ['state-idle', 'state-wait', 'state-recovery', 'state-touch', 'state-relay'];
+    const stateClass = stateClasses[f.state] || 'state-idle';
+    
+    // Type badge
+    const typeBadge = f.type === 'touch' ? 
+      '<span class="flow-badge badge-touch">TOUCH</span>' : 
+      '<span class="flow-badge badge-ir">IR</span>';
+    
+    // Active badge
+    const activeBadge = f.active ? 
+      '<span class="flow-badge badge-active">ACTIVE</span>' : 
+      '<span class="flow-badge badge-inactive">INACTIVE</span>';
+    
+    html += `
+    <div class="flow-item">
+      <div class="flow-header">
+        <div>
+          <span class="flow-name">${f.name}</span>
+          ${typeBadge}
+        </div>
+        ${activeBadge}
+      </div>
+      
+      <div class="flow-info">
+        <div class="flow-info-item">
+          <span class="flow-info-label">Motor:</span>
+          <span class="flow-info-value">Motor ${f.motor_id}</span>
+        </div>
+        <div class="flow-info-item">
+          <span class="flow-info-label">Sensor:</span>
+          <span class="flow-info-value">${f.sensor_detected ? '🟢 DETECTED' : '⚪ CLEAR'}</span>
+        </div>
+        <div class="flow-info-item">
+          <span class="flow-info-label">Angle:</span>
+          <span class="flow-info-value">${f.angle}°</span>
+        </div>
+        <div class="flow-info-item">
+          <span class="flow-info-label">Limits:</span>
+          <span class="flow-info-value">
+            ${f.limit_cw ? '🔴' : '⚪'} CW 
+            ${f.limit_ccw ? '🔴' : '⚪'} CCW
+          </span>
+        </div>
+      </div>`;
+    
+    // Touch hold progress
+    if(f.type === 'touch' && f.hold_remaining > 0) {
+      const progress = ((f.hold_duration / f.hold_required) * 100).toFixed(0);
+      html += `
+      <div class="progress-bar">
+        <div class="progress-fill" style="width:${progress}%"></div>
+        <div class="progress-text">Touch Hold: ${(f.hold_remaining/1000).toFixed(1)}s left</div>
+      </div>`;
+    }
+    
+    // Wait clear countdown
+    if(f.type === 'ir' && f.wait_remaining > 0) {
+      html += `
+      <div style="text-align:center;padding:6px;background:#FF9800;color:#fff;border-radius:4px;font-size:12px;margin-top:6px">
+        ⏳ Waiting clear: ${(f.wait_remaining/1000).toFixed(1)}s
+      </div>`;
+    }
+    
+    // Relay countdown
+    if(f.relay_active && f.relay_remaining > 0) {
+      const progress = (((f.relay_duration - f.relay_remaining) / f.relay_duration) * 100).toFixed(0);
+      html += `
+      <div class="progress-bar" style="background:#FFE5E5">
+        <div class="progress-fill" style="width:${progress}%;background:#4CAF50"></div>
+        <div class="progress-text">🔌 Relay ON: ${(f.relay_remaining/1000).toFixed(1)}s left</div>
+      </div>`;
+    }
+    
+    // State badge
+    html += `
+      <div>
+        <span class="state-badge ${stateClass}">${stateName}</span>
+      </div>
+    </div>`;
+  });
+  
+  statusDiv.innerHTML = html;
+}
 function send(id,cmd){
 if(ws&&ws.readyState===WebSocket.OPEN){
 ws.send(JSON.stringify({motor_id:id,command:cmd}));
@@ -465,24 +813,63 @@ ws.send(JSON.stringify({motor_id:id,command:cmd}));
 }
 
 function moveBy(id){
+// ===== THÊM MODE CHECK Ở ĐÂY =====
+if(sysMode === 2) {
+  alert('⚠️ Manual control blocked in AUTO mode');
+  return;
+}
+// ===== END MODE CHECK =====
+
 const v=document.getElementById('d'+id).value;
 if(v){send(id,'M'+v);document.getElementById('d'+id).value='';}
 }
-
 function moveTo(id){
+// ===== THÊM MODE CHECK Ở ĐÂY =====
+if(sysMode === 2) {
+  alert('⚠️ Manual control blocked in AUTO mode');
+  return;
+}
+// ===== END MODE CHECK =====
+
 const v=document.getElementById('g'+id).value;
 if(v){send(id,'A'+v);document.getElementById('g'+id).value='';}
 }
+function q(id,deg){
+// ===== THÊM MODE CHECK Ở ĐÂY =====
+if(sysMode === 2) {
+  alert('⚠️ Manual control blocked in AUTO mode');
+  return;
+}
+// ===== END MODE CHECK =====
 
-function q(id,deg){send(id,'M'+deg);}
-function stop(id){send(id,'STOP');}
-function reset(id){send(id,'RESET');}
+send(id,'M'+deg);
+}
+function stop(id){
+  send(id,'STOP');  // ← KHÔNG check mode, stop luôn được phép
+}
+function reset(id){
+// ===== THÊM MODE CHECK Ở ĐÂY (OPTIONAL) =====
+if(sysMode === 2) {
+  if(!confirm('Reset position in AUTO mode? This may affect flow automation.')) {
+    return;
+  }
+}
+// ===== END MODE CHECK =====
+
+send(id,'RESET');
+}
 
 function jog(id,dir,start){
+// ===== THÊM MODE CHECK Ở ĐÂY =====
+if(start && sysMode === 2) {
+  alert('⚠️ Manual control blocked in AUTO mode');
+  return;
+}
+// ===== END MODE CHECK =====
+
 if(start)send(id,'JOG_'+dir+':2');
 else send(id,'JOG_STOP');
 }
-
 function load(){
 fetch('/config.json')
 .then(r=>r.text())
@@ -502,6 +889,7 @@ document.getElementById('json').value=t;
 
 function renderSettings(){
 if(!cfg.motors)return;
+updateTabStatus(); // ✅ Update tab status after loading config
 document.getElementById('settings').innerHTML=cfg.motors.map((m,i)=>`
 <div style="border:1px solid #ddd;padding:8px;margin-bottom:8px;border-radius:4px">
 <div style="font-weight:bold;margin-bottom:6px">${m.name}</div>
@@ -522,6 +910,16 @@ document.getElementById('settings').innerHTML=cfg.motors.map((m,i)=>`
 </div>
 </div>
 <div class="cfg-item">
+  <label>PID PWM (Min | Max)</label>
+  <div class="inline">
+    <input type="number" value="${m.pid.min_output !== undefined ? m.pid.min_output : 195}"
+           onchange="upd(${i},'pid_min',+this.value)" placeholder="Min PWM">
+    <input type="number" value="${m.pid.max_output !== undefined ? m.pid.max_output : 255}"
+           onchange="upd(${i},'pid_max',+this.value)" placeholder="Max PWM">
+    <span></span>
+  </div>
+</div>
+<div class="cfg-item">
 <label>Pins (EN | R_PWM | L_PWM)</label>
 <div class="inline">
 <input type="number" value="${m.pins.rl_en}" onchange="upd(${i},'en',+this.value)" placeholder="EN">
@@ -539,6 +937,16 @@ document.getElementById('settings').innerHTML=cfg.motors.map((m,i)=>`
 </div>
 <div class="cfg-item">
 <label>Soft Limits (Min | Max)</label>
+<div class="cfg-item">
+<label>Speed Levels (S0 | S1 | S2 | S3 | S4)</label>
+<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px">
+<input type="number" value="${m.speeds?m.speeds[0]:0}" onchange="upd(${i},'s0',+this.value)" placeholder="0">
+<input type="number" value="${m.speeds?m.speeds[1]:64}" onchange="upd(${i},'s1',+this.value)" placeholder="S1">
+<input type="number" value="${m.speeds?m.speeds[2]:128}" onchange="upd(${i},'s2',+this.value)" placeholder="S2">
+<input type="number" value="${m.speeds?m.speeds[3]:192}" onchange="upd(${i},'s3',+this.value)" placeholder="S3">
+<input type="number" value="${m.speeds?m.speeds[4]:255}" onchange="upd(${i},'s4',+this.value)" placeholder="S4">
+</div>
+</div>
 <div class="inline">
 <input type="number" value="${m.limits.soft_min}" onchange="upd(${i},'min',+this.value)" placeholder="Min">
 <input type="number" value="${m.limits.soft_max}" onchange="upd(${i},'max',+this.value)" placeholder="Max">
@@ -556,6 +964,14 @@ else if(key==='ppr')m.encoder.pulses_per_rev=val;
 else if(key==='kp')m.pid.kp=val;
 else if(key==='ki')m.pid.ki=val;
 else if(key==='kd')m.pid.kd=val;
+else if(key==='pid_min') {
+  if(!m.pid) m.pid = {kp:1,ki:0,kd:0};
+  m.pid.min_output = val;
+}
+else if(key==='pid_max') {
+  if(!m.pid) m.pid = {kp:1,ki:0,kd:0};
+  m.pid.max_output = val;
+}
 else if(key==='en')m.pins.rl_en=val;
 else if(key==='rpwm')m.pins.r_pwm=val;
 else if(key==='lpwm')m.pins.l_pwm=val;
@@ -563,6 +979,11 @@ else if(key==='c1')m.pins.enc_c1=val;
 else if(key==='c2')m.pins.enc_c2=val;
 else if(key==='min')m.limits.soft_min=val;
 else if(key==='max')m.limits.soft_max=val;
+else if(key==='s0'){if(!m.speeds)m.speeds=[0,64,128,192,255];m.speeds[0]=val;}
+else if(key==='s1'){if(!m.speeds)m.speeds=[0,64,128,192,255];m.speeds[1]=val;}
+else if(key==='s2'){if(!m.speeds)m.speeds=[0,64,128,192,255];m.speeds[2]=val;}
+else if(key==='s3'){if(!m.speeds)m.speeds=[0,64,128,192,255];m.speeds[3]=val;}
+else if(key==='s4'){if(!m.speeds)m.speeds=[0,64,128,192,255];m.speeds[4]=val;}
 document.getElementById('json').value=JSON.stringify(cfg,null,2);
 }
 
@@ -583,6 +1004,31 @@ setTimeout(()=>location.reload(),500);
 });
 }catch(e){
 alert('Invalid JSON: '+e.message);
+}
+}
+
+function updateTabStatus(){
+const controlTab = document.querySelector('.tab:nth-child(1)');
+const flowTab = document.querySelector('.tab:nth-child(3)');
+
+// Check if motors config exists
+const hasMotors = cfg.motors && cfg.motors.length > 0;
+if(hasMotors){
+controlTab.classList.remove('disabled');
+controlTab.innerHTML = 'Cal Motor  ✓';
+} else {
+controlTab.classList.add('disabled');
+controlTab.innerHTML = 'Cal Motor ⚠️';
+}
+
+// Check if flows config exists
+const hasFlows = flowCfg.flows && flowCfg.flows.length > 0;
+if(hasFlows){
+flowTab.classList.remove('disabled');
+flowTab.innerHTML = 'Flow ✓';
+} else {
+flowTab.classList.add('disabled');
+flowTab.innerHTML = 'Flow ⚠️';
 }
 }
 
@@ -680,46 +1126,28 @@ void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP) {
       }
     });
     server.on("/reload-motors", HTTP_GET, [](AsyncWebServerRequest *request) {
-      // Stop all motors
-      for(int i = 0; i < motorCount; i++) {
-        if(motors[i].initialized) {
-          motorStop(i);
-        }
-      }
+      // CHỈ reload config JSON, KHÔNG init lại hardware để tránh lỗi PCNT "Too many encoders"
       
-      delay(100);
-      
-      // Reload config
       extern SystemConfig sysConfig;
       if(!loadSystemConfig()) {
         request->send(500, "text/plain", "Failed to load config");
         return;
       }
       
-      // Clear old motors
-      motorsReady = false;
-      motorCount = 0;
-      
-      // Reinit motors
-      motorCount = sysConfig.motorCount;
-      for(int i = 0; i < motorCount; i++) {
-        MotorConfig &mc = sysConfig.motors[i];
-        
-        motorSetup(
-          i,
-          mc.id, mc.name,
-          mc.pins.rl_en, mc.pins.r_pwm, mc.pins.l_pwm,
-          mc.pins.enc_c1, mc.pins.enc_c2,
-          mc.pulses_per_rev,
-          mc.kp, mc.ki, mc.kd,
-          mc.soft_min, mc.soft_max
-        );
+      // Cập nhật parameters từ config (KHÔNG touch encoder hardware)
+      for(int i = 0; i < motorCount && i < sysConfig.motorCount; i++) {
+        if(motors[i].initialized) {
+          motors[i].name = sysConfig.motors[i].name;
+          motors[i].pulsesPerRev = sysConfig.motors[i].pulses_per_rev;
+          motors[i].degreesPerPulse = 360.0 / sysConfig.motors[i].pulses_per_rev;
+          motors[i].pid.tune(sysConfig.motors[i].kp, sysConfig.motors[i].ki, sysConfig.motors[i].kd);
+          motors[i].softLimitMin = sysConfig.motors[i].soft_min;
+          motors[i].softLimitMax = sysConfig.motors[i].soft_max;
+        }
       }
       
-      motorsReady = true;
-      
-      request->send(200, "text/plain", "✅ Motors reloaded!");
-      Serial.println("✅ Motors reloaded from config");
+      request->send(200, "text/plain", "✅ Config reloaded (no hardware reinit)");
+      Serial.println("✅ Config updated without hardware reinit");
     });
     server.on("/flow_config.json", HTTP_GET, [](AsyncWebServerRequest *request) {
     if(LittleFS.exists("/flow_config.json")) {
@@ -885,8 +1313,96 @@ void broadcastStatusPeriodic() {
       pid["kd"] = m.pid.Kd;
       pid["moves"] = m.pid.moveCount;
     }
-    
+    // Mode info
+    doc["system_mode"] = (int)sysState.currentMode;
+    doc["mode_name"] = getCurrentModeString();
+    doc["status_msg"] = sysState.statusMessage;
+    doc["flows_active"] = countActiveFlows();
     doc["queue"] = commandQueue.count;
+    // ===== FLOW STATUS =====
+    JsonArray flowsArray = doc.createNestedArray("flows");
+    for(int i = 0; i < flowSysConfig.flowCount; i++) {
+      JsonObject flow = flowsArray.createNestedObject();
+      FlowConfigData* fc = &flowSysConfig.flows[i];
+      FlowRuntime* fr = &flowRuntimes[i];
+      
+      flow["id"] = i;
+      flow["name"] = fc->name;
+      flow["type"] = fc->sensor.type;  // "ir" hoặc "touch"
+      flow["motor_id"] = fc->motor_id;
+      flow["active"] = fr->active;
+      flow["state"] = (int)fr->state;  // 0=IDLE, 1=WAIT_CLEAR, 2=RECOVERY, 3=TOUCH_HOLD, 4=RELAY_ACTIVE
+      
+      // Sensor status
+      if(fc->pins.sensor >= 0) {
+        bool sensorDetected = (digitalRead(fc->pins.sensor) == LOW);
+        flow["sensor_detected"] = sensorDetected;
+      } else {
+        flow["sensor_detected"] = false;
+      }
+      
+      // Touch hold progress
+      if(fc->sensor.type == "touch" && fr->state == 0 && fr->sensorLastState) {
+        unsigned long holdDuration = millis() - fr->touchHoldStartTime;
+        flow["hold_duration"] = holdDuration;
+        flow["hold_required"] = fc->sensor.hold_time;
+        if(holdDuration < fc->sensor.hold_time) {
+          flow["hold_remaining"] = fc->sensor.hold_time - holdDuration;
+        } else {
+          flow["hold_remaining"] = 0;
+        }
+      } else {
+        flow["hold_duration"] = 0;
+        flow["hold_required"] = fc->sensor.hold_time;
+        flow["hold_remaining"] = 0;
+      }
+      
+      // Wait clear countdown (IR sensor)
+      if(fc->sensor.type == "ir" && fr->state == 1) {  // FLOW_WAIT_CLEAR
+        unsigned long elapsed = millis() - fr->sensorLastDetectedTime;
+        if(elapsed < fc->sensor.clear_time) {
+          flow["wait_remaining"] = fc->sensor.clear_time - elapsed;
+        } else {
+          flow["wait_remaining"] = 0;
+        }
+      } else {
+        flow["wait_remaining"] = 0;
+      }
+      
+      // Relay status (Touch sensor)
+      if(fr->state == 4 && fr->relayStartTime > 0) {  // FLOW_RELAY_ACTIVE
+        unsigned long elapsed = millis() - fr->relayStartTime;
+        if(elapsed < fc->relay.duration) {
+          flow["relay_active"] = true;
+          flow["relay_remaining"] = fc->relay.duration - elapsed;
+        } else {
+          flow["relay_active"] = false;
+          flow["relay_remaining"] = 0;
+        }
+      } else {
+        flow["relay_active"] = false;
+        flow["relay_remaining"] = 0;
+      }
+      
+      // Limit switch status
+      if(fc->pins.limit_cw >= 0) {
+        flow["limit_cw"] = (digitalRead(fc->pins.limit_cw) == LOW);
+      } else {
+        flow["limit_cw"] = false;
+      }
+      
+      if(fc->pins.limit_ccw >= 0) {
+        flow["limit_ccw"] = (digitalRead(fc->pins.limit_ccw) == LOW);
+      } else {
+        flow["limit_ccw"] = false;
+      }
+      
+      // Config info
+      flow["angle"] = fc->movement.angle;
+      flow["clear_time"] = fc->sensor.clear_time;
+      flow["relay_duration"] = fc->relay.duration;
+    }
+    // ===== END FLOW STATUS =====
     
     String currentJson;
     serializeJson(doc, currentJson);

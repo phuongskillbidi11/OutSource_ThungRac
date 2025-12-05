@@ -5,10 +5,12 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
+
 struct FlowPins {
   int sensor;
   int limit_cw;
   int limit_ccw;
+  int relay;
 };
 
 struct FlowMovement {
@@ -18,9 +20,16 @@ struct FlowMovement {
   int min_speed;
 };
 
-struct FlowSensor {
+struct FlowSensorConfig {
+  String type;               // "ir" hoặc "touch"
+  unsigned long hold_time;   // Touch hold time (ms)
   unsigned long clear_time;
   unsigned long debounce_time;
+};
+
+struct FlowRelayConfig {
+  unsigned long duration;    // Bật relay bao lâu (ms)
+  bool inverted;            // true = LOW=ON, false = HIGH=ON
 };
 
 struct FlowPID {
@@ -36,7 +45,8 @@ struct FlowConfigData {
   String name;
   FlowPins pins;
   FlowMovement movement;
-  FlowSensor sensor;
+  FlowSensorConfig sensor;   // ← THAY ĐỔI: Từ FlowSensor → FlowSensorConfig
+  FlowRelayConfig relay;     // ← THÊM
   FlowPID pid;
 };
 
@@ -65,7 +75,7 @@ inline bool loadFlowConfig() {
       return false;
     }
     
-    file.print(R"({"version":"1.0","flow_count":1,"flows":[{"id":0,"motor_id":0,"enabled":true,"name":"Flow Motor 1","pins":{"sensor":7,"limit_cw":12,"limit_ccw":14},"movement":{"angle":90.0,"timeout":2500,"max_speed":160,"min_speed":195},"sensor":{"clear_time":5000,"debounce_time":100},"pid":{"kp":2.0,"ki":0.01,"kd":10.0}}]})");
+    file.print(R"({"version":"1.0","flow_count":1,"flows":[{"id":0,"motor_id":0,"enabled":true,"name":"Flow Motor 1","pins":{"sensor":13,"limit_cw":12,"limit_ccw":14},"movement":{"angle":90.0,"timeout":2500,"max_speed":160,"min_speed":195},"sensor":{"clear_time":5000,"debounce_time":100},"pid":{"kp":2.0,"ki":0.01,"kd":10.0}}]})");
     
     file.close();
     Serial.println("Default flow_config.json created");
@@ -113,8 +123,15 @@ inline bool loadFlowConfig() {
     flowSysConfig.flows[i].movement.min_speed = f["movement"]["min_speed"];
     
     // Sensor
+    flowSysConfig.flows[i].sensor.type = f["sensor"]["type"] | "ir";  // Default "ir"
+    flowSysConfig.flows[i].sensor.hold_time = f["sensor"]["hold_time"] | 0;
     flowSysConfig.flows[i].sensor.clear_time = f["sensor"]["clear_time"];
     flowSysConfig.flows[i].sensor.debounce_time = f["sensor"]["debounce_time"];
+
+    //  RELAY CONFIG 
+    flowSysConfig.flows[i].pins.relay = f["pins"]["relay"] | -1;  // -1 = không dùng relay
+    flowSysConfig.flows[i].relay.duration = f["relay"]["duration"] | 3000;
+    flowSysConfig.flows[i].relay.inverted = f["relay"]["inverted"] | true;
     
     // PID
     flowSysConfig.flows[i].pid.kp = f["pid"]["kp"];

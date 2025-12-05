@@ -251,6 +251,8 @@ struct Motor {
   PIDController pid;
   float kp = 1.0, ki = 0.0, kd = 0.0;
   
+  int speedPWM[5] = {0, 64, 128, 192, 255};  // NEW: Per-motor speed levels
+  
   unsigned long lastSpeedCheck = 0;
   int64_t lastEncoderPosition = 0;
   float motorRPM = 0.0;
@@ -258,9 +260,7 @@ struct Motor {
 
 extern Motor motors[10];
 extern int motorCount;
-extern bool motorsReady;  
-
-extern int speedPWM[5];
+extern bool motorsReady;
 
 
 // ===== SETUP MOTOR =====
@@ -268,7 +268,8 @@ inline void motorSetup(int index, int _id, String _name,
                 int _rl_en, int _r_pwm, int _l_pwm, 
                 int _enc_c1, int _enc_c2, 
                 int _ppr, float _kp, float _ki, float _kd,
-                int64_t _soft_min, int64_t _soft_max) {
+                int64_t _soft_min, int64_t _soft_max,
+                int _speeds[5], int _pid_min_output, int _pid_max_output) {  
   
   if (index >= 10) {
     Serial.printf("ERROR: Motor index %d >= 10!\n", index);
@@ -291,10 +292,17 @@ inline void motorSetup(int index, int _id, String _name,
   m.ki = _ki;
   m.kd = _kd;
   m.pid.tune(_kp, _ki, _kd);
+  m.pid.min_output = _pid_min_output;
+  m.pid.max_output = _pid_max_output;
   
   m.softLimitMin = _soft_min;
   m.softLimitMax = _soft_max;
   m.softLimitsEnabled = false;
+  
+  // Copy speed levels
+  for(int i = 0; i < 5; i++) {
+    m.speedPWM[i] = _speeds[i];
+  }
   
   m.currentDir = DIR_STOP;
   m.currentSpeed = SPEED_STOP;
@@ -322,6 +330,13 @@ inline void motorSetup(int index, int _id, String _name,
   delay(10);
   
   ESP32Encoder::useInternalWeakPullResistors = UP;
+  
+  // Nếu motor đã được init trước đó, tạo encoder mới để tránh lỗi "already attached"
+  if (m.initialized) {
+    m.encoder = ESP32Encoder();  // Reset encoder object
+    delay(10);
+  }
+
   m.encoder.attachFullQuad(m.enc_c1, m.enc_c2);
   m.encoder.setFilter(1023);
   m.encoder.clearCount();
@@ -366,7 +381,7 @@ inline void motorSetSpeed(int index, Direction dir, SpeedLevel spd) {
   m.currentDir = dir;
   m.currentSpeed = spd;
   
-  int pwm = speedPWM[spd];
+  int pwm = m.speedPWM[spd];  // ← Use per-motor speed array
   
   int r_channel = 0 + (index * 2);
   int l_channel = 1 + (index * 2);

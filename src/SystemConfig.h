@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
-
+#include "MotorController.h"
 struct MotorPins {
   int rl_en;
   int r_pwm;
@@ -20,6 +20,9 @@ struct MotorConfig {
   int pulses_per_rev;
   float kp, ki, kd;
   int64_t soft_min, soft_max;
+  int speed_levels[5];  // NEW: PWM values [STOP, SPEED_1, SPEED_2, SPEED_3, SPEED_4]
+  int pid_min_output;
+  int pid_max_output;
 };
 
 struct SystemConfig {
@@ -48,9 +51,9 @@ bool loadSystemConfig() {
     }
     
     file.print(R"({"version":"1.0","motor_count":3,"motors":[
-{"id":0,"name":"Motor 1","pins":{"rl_en":4,"r_pwm":5,"l_pwm":6,"enc_c1":35,"enc_c2":36},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0},"limits":{"soft_min":-99999,"soft_max":99999}},
-{"id":1,"name":"Motor 2","pins":{"rl_en":7,"r_pwm":8,"l_pwm":9,"enc_c1":37,"enc_c2":38},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0},"limits":{"soft_min":-99999,"soft_max":99999}},
-{"id":2,"name":"Motor 3","pins":{"rl_en":10,"r_pwm":11,"l_pwm":12,"enc_c1":39,"enc_c2":40},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0},"limits":{"soft_min":-99999,"soft_max":99999}}
+{"id":0,"name":"Motor 1","pins":{"rl_en":4,"r_pwm":5,"l_pwm":6,"enc_c1":35,"enc_c2":36},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0,"min_output":195,"max_output":255},"limits":{"soft_min":-99999,"soft_max":99999},"speeds":[0,64,128,192,255]},
+{"id":1,"name":"Motor 2","pins":{"rl_en":7,"r_pwm":8,"l_pwm":9,"enc_c1":37,"enc_c2":38},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0,"min_output":195,"max_output":255},"limits":{"soft_min":-99999,"soft_max":99999},"speeds":[0,64,128,192,255]},
+{"id":2,"name":"Motor 3","pins":{"rl_en":10,"r_pwm":11,"l_pwm":12,"enc_c1":39,"enc_c2":40},"encoder":{"pulses_per_rev":2550},"pid":{"kp":1.0,"ki":0.0,"kd":0.0,"min_output":195,"max_output":255},"limits":{"soft_min":-99999,"soft_max":99999},"speeds":[0,64,128,192,255]}
 ]})");
     
     file.close();
@@ -96,9 +99,27 @@ DynamicJsonDocument doc(4096);
     sysConfig.motors[i].kp = m["pid"]["kp"];
     sysConfig.motors[i].ki = m["pid"]["ki"];
     sysConfig.motors[i].kd = m["pid"]["kd"];
+    sysConfig.motors[i].pid_min_output = m["pid"]["min_output"] | MIN_STARTUP_SPEED;
+    sysConfig.motors[i].pid_max_output = m["pid"]["max_output"] | 255;
+
     
     sysConfig.motors[i].soft_min = m["limits"]["soft_min"];
     sysConfig.motors[i].soft_max = m["limits"]["soft_max"];
+    
+    // Load speed levels (with defaults if not present)
+    if(m.containsKey("speeds")) {
+      JsonArray speedsArray = m["speeds"];
+      for(int s = 0; s < 5 && s < speedsArray.size(); s++) {
+        sysConfig.motors[i].speed_levels[s] = speedsArray[s];
+      }
+    } else {
+      // Default speeds if not in config
+      sysConfig.motors[i].speed_levels[0] = 0;
+      sysConfig.motors[i].speed_levels[1] = 64;
+      sysConfig.motors[i].speed_levels[2] = 128;
+      sysConfig.motors[i].speed_levels[3] = 192;
+      sysConfig.motors[i].speed_levels[4] = 255;
+    }
     
     Serial.printf("  [%d] %s - EN:%d PWM:%d/%d ENC:%d/%d\n", 
       sysConfig.motors[i].id, sysConfig.motors[i].name.c_str(),

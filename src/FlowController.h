@@ -34,6 +34,11 @@ struct FlowRuntime {
   unsigned long relayStartTime;       // Thời điểm bật relay
   bool touchHoldTriggered;           // Đã trigger flow chưa
   // ===== END TOUCH & RELAY STATE =====
+  bool completionTriggered;  // Đã trigger flow hoàn thành chưa
+  unsigned long completionTriggerTime; // Thời điểm trigger flow hoàn thành
+  bool completionTriggerPending; // Có trigger hoàn thành đang chờ không
+  bool relayTriggerWaiting; 
+   unsigned long relayTriggerWaitStart;
 };
 // Global flow runtimes (max 10 flows)
 extern FlowRuntime flowRuntimes[10];

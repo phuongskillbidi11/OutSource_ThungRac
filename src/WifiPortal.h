@@ -536,8 +536,16 @@ document.getElementById('flowsettings').innerHTML=flowCfg.flows.map((f,i)=>`
 <input type="number" value="${f.motor_id}" onchange="updFlow(${i},'motor_id',+this.value)">
 </div>
 <div class="cfg-item">
-<label>Sensor Pin</label>
-<input type="number" value="${f.pins.sensor}" onchange="updFlow(${i},'sensor',+this.value)">
+<label>Sensor Type</label>
+<select onchange="updFlow(${i},'sensor_type',this.value)">
+<option value="ir" ${f.sensor.type==='ir'?'selected':''}>IR Sensor (Auto detect)</option>
+<option value="touch" ${f.sensor.type==='touch'?'selected':''}>Touch Sensor (Hold & Release)</option>
+<option value="completion" ${f.sensor.type==='completion'?'selected':''}>Completion Trigger (Auto after Flow)</option>
+</select>
+</div>
+<div class="cfg-item">
+<label>Sensor Pin ${f.sensor.type==='completion'?'(Not used)':''}</label>
+<input type="number" value="${f.pins.sensor}" onchange="updFlow(${i},'sensor',+this.value)" ${f.sensor.type==='completion'?'disabled':''}>
 </div>
 <div class="cfg-item">
 <label>Limit Pins (CW | CCW)</label>
@@ -546,6 +554,10 @@ document.getElementById('flowsettings').innerHTML=flowCfg.flows.map((f,i)=>`
 <input type="number" value="${f.pins.limit_ccw}" onchange="updFlow(${i},'limit_ccw',+this.value)" placeholder="CCW">
 <span></span>
 </div>
+</div>
+<div class="cfg-item">
+<label>Relay Pin</label>
+<input type="number" value="${f.pins.relay}" onchange="updFlow(${i},'relay_pin',+this.value)">
 </div>
 <div class="cfg-item">
 <label>Move Angle (°)</label>
@@ -564,12 +576,43 @@ document.getElementById('flowsettings').innerHTML=flowCfg.flows.map((f,i)=>`
 <input type="number" value="${f.movement.timeout}" onchange="updFlow(${i},'timeout',+this.value)">
 </div>
 <div class="cfg-item">
-<label>Sensor Clear Time (ms)</label>
+<label>
+${f.sensor.type==='completion'?'⏳ Wait Before Return (ms)':'⏳ Sensor Clear Time (ms)'}
+<small style="display:block;color:#666;font-weight:normal">
+${f.sensor.type==='completion'?'Time to wait before returning to zero':'Time sensor must be clear before return'}
+</small>
+</label>
 <input type="number" value="${f.sensor.clear_time}" onchange="updFlow(${i},'clear_time',+this.value)">
+</div>
+<div class="cfg-item">
+<label>
+${f.sensor.type==='touch'?'👆 Touch Hold Time (ms)':f.sensor.type==='completion'?'⏰ Trigger Delay (ms)':'⏱️ Hold Time (ms)'}
+<small style="display:block;color:#666;font-weight:normal">
+${f.sensor.type==='touch'?'Time to hold touch before trigger':f.sensor.type==='completion'?'Delay after previous flow complete':'Not used for IR sensors'}
+</small>
+</label>
+<input type="number" value="${f.sensor.hold_time}" onchange="updFlow(${i},'hold_time',+this.value)" ${f.sensor.type==='ir'?'disabled':''}>
 </div>
 <div class="cfg-item">
 <label>Debounce Time (ms)</label>
 <input type="number" value="${f.sensor.debounce_time}" onchange="updFlow(${i},'debounce',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Relay Duration (ms)</label>
+<input type="number" value="${f.relay.duration}" onchange="updFlow(${i},'relay_duration',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Relay Trigger Timeout (ms)</label>
+<input type="number" value="${f.relay.trigger_timeout||10000}" onchange="updFlow(${i},'relay_trigger_timeout',+this.value)">
+</div>
+<div class="cfg-item">
+<label>Relay Logic</label>
+<div class="inline">
+<label style="display:flex;align-items:center;gap:8px">
+<input type="checkbox" ${f.relay.inverted?'checked':''} onchange="updFlow(${i},'relay_inverted',this.checked)">
+<span>Inverted (LOW=ON)</span>
+</label>
+</div>
 </div>
 <div class="cfg-item">
 <label>PID (Kp | Ki | Kd)</label>
@@ -604,6 +647,12 @@ else if(key==='debounce')f.sensor.debounce_time=val;
 else if(key==='kp')f.pid.kp=val;
 else if(key==='ki')f.pid.ki=val;
 else if(key==='kd')f.pid.kd=val;
+else if(key==='hold_time')f.sensor.hold_time=val;
+else if(key==='sensor_type')f.sensor.type=val;
+else if(key==='relay_pin')f.pins.relay=val;
+else if(key==='relay_duration')f.relay.duration=val;
+else if(key==='relay_inverted')f.relay.inverted=val;
+else if(key==='relay_trigger_timeout')f.relay.trigger_timeout=val;
 document.getElementById('flowjson').value=JSON.stringify(flowCfg,null,2);
 }
 
@@ -767,6 +816,30 @@ function updateFlowStatus(flows){
           </span>
         </div>
       </div>`;
+      if(f.type === 'completion' && f.trigger_pending && f.trigger_remaining > 0) {
+        html += `
+        <div style="text-align:center;padding:6px;background:#9C27B0;color:#fff;border-radius:4px;font-size:12px;margin-top:6px">
+          ⏰ Trigger in: ${(f.trigger_remaining/1000).toFixed(1)}s
+        </div>`;
+      }
+
+      // ⏳ Wait clear countdown (for Completion flow after move)
+      if(f.type === 'completion' && f.wait_remaining > 0) {
+        html += `
+        <div style="text-align:center;padding:6px;background:#FF9800;color:#fff;border-radius:4px;font-size:12px;margin-top:6px">
+          ⏳ Waiting clear: ${(f.wait_remaining/1000).toFixed(1)}s
+        </div>`;
+      }
+
+      // 🔘 Relay trigger waiting (THÊM CHO TẤT CẢ FLOW)
+      if(f.relay_trigger_waiting) {
+        const progress = ((f.relay_trigger_elapsed / f.relay_trigger_timeout) * 100).toFixed(0);
+        html += `
+        <div class="progress-bar" style="background:#E3F2FD">
+          <div class="progress-fill" style="width:${progress}%;background:#2196F3"></div>
+          <div class="progress-text">🔘 Waiting for button: ${(f.relay_trigger_remaining/1000).toFixed(0)}s left</div>
+        </div>`;
+      }
     
     // Touch hold progress
     if(f.type === 'touch' && f.hold_remaining > 0) {
@@ -1401,6 +1474,29 @@ void broadcastStatusPeriodic() {
       flow["angle"] = fc->movement.angle;
       flow["clear_time"] = fc->sensor.clear_time;
       flow["relay_duration"] = fc->relay.duration;
+      if(fc->sensor.type == "completion") {
+        flow["trigger_pending"] = fr->completionTriggerPending;        
+        if(fr->completionTriggerPending && fr->completionTriggerTime > millis()) {
+          unsigned long remaining = fr->completionTriggerTime - millis();
+          flow["trigger_remaining"] = remaining;
+        } else {
+          flow["trigger_remaining"] = 0;
+        }
+      }
+
+    // ===== RELAY TRIGGER WAITING STATUS (CHO TẤT CẢ FLOW) =====
+    // NOTE: Cần thêm biến tracking trong FlowRuntime struct!
+    // Tạm thời set false, cần implement logic chờ button sau
+      if(fr->relayTriggerWaiting) {
+        unsigned long elapsed = millis() - fr->relayTriggerWaitStart;
+        flow["relay_trigger_waiting"] = true;
+        flow["relay_trigger_elapsed"] = elapsed;
+        flow["relay_trigger_remaining"] = (elapsed < 10000) ? (10000 - elapsed) : 0;
+      } else {
+        flow["relay_trigger_waiting"] = false;
+        flow["relay_trigger_elapsed"] = 0;
+        flow["relay_trigger_remaining"] = 0;
+      }
     }
     // ===== END FLOW STATUS =====
     

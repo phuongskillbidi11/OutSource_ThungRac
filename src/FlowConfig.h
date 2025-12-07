@@ -5,12 +5,12 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
-
 struct FlowPins {
   int sensor;
   int limit_cw;
   int limit_ccw;
   int relay;
+  int relay_trigger;
 };
 
 struct FlowMovement {
@@ -21,15 +21,16 @@ struct FlowMovement {
 };
 
 struct FlowSensorConfig {
-  String type;               // "ir" hoặc "touch"
-  unsigned long hold_time;   // Touch hold time (ms)
+  String type;
+  unsigned long hold_time;
   unsigned long clear_time;
   unsigned long debounce_time;
 };
 
 struct FlowRelayConfig {
-  unsigned long duration;    // Bật relay bao lâu (ms)
-  bool inverted;            // true = LOW=ON, false = HIGH=ON
+  unsigned long duration;
+  bool inverted;
+  unsigned long trigger_timeout;
 };
 
 struct FlowPID {
@@ -45,8 +46,8 @@ struct FlowConfigData {
   String name;
   FlowPins pins;
   FlowMovement movement;
-  FlowSensorConfig sensor;   // ← THAY ĐỔI: Từ FlowSensor → FlowSensorConfig
-  FlowRelayConfig relay;     // ← THÊM
+  FlowSensorConfig sensor;
+  FlowRelayConfig relay;
   FlowPID pid;
 };
 
@@ -75,7 +76,7 @@ inline bool loadFlowConfig() {
       return false;
     }
     
-    file.print(R"({"version":"1.0","flow_count":1,"flows":[{"id":0,"motor_id":0,"enabled":true,"name":"Flow Motor 1","pins":{"sensor":13,"limit_cw":12,"limit_ccw":14},"movement":{"angle":90.0,"timeout":2500,"max_speed":160,"min_speed":195},"sensor":{"clear_time":5000,"debounce_time":100},"pid":{"kp":2.0,"ki":0.01,"kd":10.0}}]})");
+    file.print(R"({"version":"1.0","flow_count":1,"flows":[{"id":0,"motor_id":0,"enabled":true,"name":"Flow Motor 1","pins":{"sensor":13,"limit_cw":12,"limit_ccw":14,"relay":-1,"relay_trigger":-1},"movement":{"angle":90.0,"timeout":2500,"max_speed":160,"min_speed":195},"sensor":{"type":"ir","hold_time":0,"clear_time":5000,"debounce_time":100},"relay":{"duration":3000,"inverted":true},"pid":{"kp":2.0,"ki":0.01,"kd":10.0}}]})");
     
     file.close();
     Serial.println("Default flow_config.json created");
@@ -111,10 +112,12 @@ inline bool loadFlowConfig() {
     flowSysConfig.flows[i].enabled = f["enabled"];
     flowSysConfig.flows[i].name = f["name"].as<String>();
     
-    // Pins
-    flowSysConfig.flows[i].pins.sensor = f["pins"]["sensor"];
-    flowSysConfig.flows[i].pins.limit_cw = f["pins"]["limit_cw"];
-    flowSysConfig.flows[i].pins.limit_ccw = f["pins"]["limit_ccw"];
+    // Pins - ✅ ĐỌC ĐẦY ĐỦ TẤT CẢ PINS
+    flowSysConfig.flows[i].pins.sensor = f["pins"]["sensor"] | -1;
+    flowSysConfig.flows[i].pins.limit_cw = f["pins"]["limit_cw"] | -1;
+    flowSysConfig.flows[i].pins.limit_ccw = f["pins"]["limit_ccw"] | -1;
+    flowSysConfig.flows[i].pins.relay = f["pins"]["relay"] | -1;
+    flowSysConfig.flows[i].pins.relay_trigger = f["pins"]["relay_trigger"] | -1;
     
     // Movement
     flowSysConfig.flows[i].movement.angle = f["movement"]["angle"];
@@ -123,15 +126,15 @@ inline bool loadFlowConfig() {
     flowSysConfig.flows[i].movement.min_speed = f["movement"]["min_speed"];
     
     // Sensor
-    flowSysConfig.flows[i].sensor.type = f["sensor"]["type"] | "ir";  // Default "ir"
+    flowSysConfig.flows[i].sensor.type = f["sensor"]["type"] | "ir";
     flowSysConfig.flows[i].sensor.hold_time = f["sensor"]["hold_time"] | 0;
-    flowSysConfig.flows[i].sensor.clear_time = f["sensor"]["clear_time"];
-    flowSysConfig.flows[i].sensor.debounce_time = f["sensor"]["debounce_time"];
+    flowSysConfig.flows[i].sensor.clear_time = f["sensor"]["clear_time"] | 5000;
+    flowSysConfig.flows[i].sensor.debounce_time = f["sensor"]["debounce_time"] | 100;
 
-    //  RELAY CONFIG 
-    flowSysConfig.flows[i].pins.relay = f["pins"]["relay"] | -1;  // -1 = không dùng relay
+    // Relay
     flowSysConfig.flows[i].relay.duration = f["relay"]["duration"] | 3000;
     flowSysConfig.flows[i].relay.inverted = f["relay"]["inverted"] | true;
+    flowSysConfig.flows[i].relay.trigger_timeout = f["relay"]["trigger_timeout"] | 10000;
     
     // PID
     flowSysConfig.flows[i].pid.kp = f["pid"]["kp"];
@@ -162,11 +165,15 @@ inline void printFlowConfig() {
     Serial.printf("║   Motor ID: %d | %s\n", 
       flowSysConfig.flows[i].motor_id,
       flowSysConfig.flows[i].enabled ? "ENABLED" : "DISABLED");
-    Serial.printf("║   Sensor: GPIO%d\n", 
-      flowSysConfig.flows[i].pins.sensor);
+    Serial.printf("║   Sensor: GPIO%d (%s)\n", 
+      flowSysConfig.flows[i].pins.sensor,
+      flowSysConfig.flows[i].sensor.type.c_str());
     Serial.printf("║   Limits: CW=GPIO%d CCW=GPIO%d\n",
       flowSysConfig.flows[i].pins.limit_cw,
       flowSysConfig.flows[i].pins.limit_ccw);
+    Serial.printf("║   Relay: GPIO%d | Trigger: GPIO%d\n",
+      flowSysConfig.flows[i].pins.relay,
+      flowSysConfig.flows[i].pins.relay_trigger);
     Serial.printf("║   Angle: %.1f° | Timeout: %dms\n",
       flowSysConfig.flows[i].movement.angle,
       flowSysConfig.flows[i].movement.timeout);
